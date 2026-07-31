@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+:root {
+  /* Warm kraft-paper base — the body gradient layers on top of this. */
+  --background: #fafaf9;
+  --foreground: #292524;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Modern Techno-Graphite — headers, banners, dark surfaces */
+  --color-graphite-50: #f4f5f7;
+  --color-graphite-100: #e5e7eb;
+  --color-graphite-200: #cdd2d9;
+  --color-graphite-300: #a7afbc;
+  --color-graphite-400: #7a8496;
+  --color-graphite-500: #5a6472;
+  --color-graphite-600: #454d59;
+  --color-graphite-700: #363c48;
+  --color-graphite-800: #2b303a;
+  --color-graphite-900: #252b36;
+  --color-graphite-950: #1e2229;
+
+  /* Vibrant orange — primary actions, highlights */
+  --color-accent-50: #fff3ea;
+  --color-accent-100: #ffe1cc;
+  --color-accent-200: #ffc199;
+  --color-accent-300: #ff9d5c;
+  --color-accent-400: #ff8433;
+  --color-accent-500: #ff6b00;
+  --color-accent-600: #e05f00;
+  --color-accent-700: #b84e00;
+  --color-accent-800: #943f00;
+  --color-accent-900: #7a3400;
+}
+
+body {
+  /* background-color longhand only — the kraft gradient utility on <body>
+     supplies background-image, and this unlayered rule must not reset it. */
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Trusted-brands marquee */
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 30s linear infinite;
+}
+
+.marquee-mask {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 8%,
+    #000 92%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 8%,
+    #000 92%,
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee {
+    animation: none;
+  }
+}

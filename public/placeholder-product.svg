@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600" role="img" aria-label="Немає фото товару">
+  <rect width="600" height="600" fill="#e5e7eb"/>
+  <g fill="none" stroke="#9aa1ab" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M243 214l-70 70a44 44 0 0 0 62 62l86-86a70 70 0 0 1 96-96l-52 52 34 34 52-52a70 70 0 0 1-96 96"/>
+  </g>
+  <text x="300" y="470" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700" fill="#9aa1ab" text-anchor="middle">ПанГосподар</text>
+  <text x="300" y="512" font-family="Arial, Helvetica, sans-serif" font-size="24" fill="#b5bcc6" text-anchor="middle">немає фото</text>
+</svg>
