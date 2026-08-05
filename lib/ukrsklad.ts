@@ -1,31 +1,28 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { XMLParser } from "fast-xml-parser";
-import { products as fallbackProducts, categories, type Product } from "@/lib/products";
+import { products as fallbackProducts, type Product } from "@/lib/products";
+// Type-only import — erased at build time, so there is no circular dependency.
+import type { LoadProductsResult } from "@/lib/catalog";
+import {
+  detectBrand,
+  inferCategory,
+  mapCategory,
+  resolveImage,
+  safeCategorySlug,
+} from "@/lib/product-mapping";
 
 /**
  * Server-only data layer for the УкрСклад synchronization file.
  *
  * Supports XML, JSON and CSV exports (УкрСклад CSV is UTF-16 LE, `;`-delimited).
- * Reads a local file (or a folder containing one) from `UKR_SKLAD_FILE_PATH`,
- * normalizes it into the project's `Product` shape, and falls back to the seed
- * catalog if the source is missing, unreadable, or invalid — so the site never
- * crashes because of a bad sync file.
+ * Reads a local file (or a folder containing one) from `UKR_SKLAD_FILE_PATH`.
+ *
+ * This is the legacy/offline source — Postgres is the production source of
+ * truth. See `lib/catalog.ts`, which picks between them.
  */
 
-export type ProductSource = "ukrsklad" | "fallback";
-
-export interface LoadProductsResult {
-  products: Product[];
-  source: ProductSource;
-  error?: string;
-  loadedAt: string;
-}
-
 type RawItem = Record<string, unknown>;
-
-/** Local asset used when the export has no usable image URL (e.g. Blob photos). */
-const LOCAL_PLACEHOLDER = "/placeholder-product.svg";
 
 /** Field name candidates (UA/RU/EN + УкрСклад CSV headers), matched case-insensitively. */
 const FIELD_ALIASES = {
@@ -72,80 +69,6 @@ const FIELD_ALIASES = {
   warranty: ["гарантія", "гарантия", "warranty"],
 } as const;
 
-const KNOWN_SLUGS = new Set(categories.map((category) => category.slug));
-
-/** Common tool-market brands, used to recover a brand from the product name
- *  when the УкрСклад "Виробник" column is empty (as it usually is here). */
-const KNOWN_BRANDS = [
-  "STIHL",
-  "Husqvarna",
-  "Bosch",
-  "Makita",
-  "Metabo",
-  "DeWalt",
-  "AL-KO",
-  "Einhell",
-  "Oregon",
-  "NGK",
-  "Forte",
-  "Stark",
-  "APRO",
-  "Sadko",
-  "Vitals",
-  "Dnipro-M",
-  "Grunhelm",
-  "Sturm",
-  "Intertool",
-  "Sigma",
-  "Yato",
-  "Neo Tools",
-  "Bautec",
-  "Werk",
-  "Tekhmann",
-  "Vorskla",
-  "Rebir",
-  "Patriot",
-  "Vega",
-  "Kraft",
-];
-
-/** УкрСклад's "Виробник" column often holds a country of origin, not a brand. */
-const COUNTRY_VALUES = new Set([
-  "польща",
-  "австрія",
-  "бразилія",
-  "китай",
-  "німеччина",
-  "сша",
-  "угорщина",
-  "італія",
-  "україна",
-  "туреччина",
-  "франція",
-  "японія",
-  "іспанія",
-  "чехія",
-  "румунія",
-  "індія",
-  "тайвань",
-  "корея",
-  "південна корея",
-  "великобританія",
-  "білорусь",
-  "словаччина",
-  "словенія",
-  "нідерланди",
-  "в'єтнам",
-]);
-
-function detectBrand(explicit: string, name: string): string {
-  const trimmed = explicit.trim();
-  if (trimmed && !COUNTRY_VALUES.has(trimmed.toLowerCase())) {
-    return trimmed;
-  }
-  const lower = name.toLowerCase();
-  return KNOWN_BRANDS.find((brand) => lower.includes(brand.toLowerCase())) ?? "";
-}
 
 /* ------------------------------- helpers -------------------------------- */
 
@@ -188,47 +111,6 @@ function toNumber(value: unknown): number {
   return Number.isFinite(num) ? num : 0;
 }
 
-/** Map an explicit УкрСклад group name onto one of the site's category slugs. */
-function mapCategory(rawGroup: string): string {
-  const group = rawGroup.toLowerCase();
-  if (/бензо|мотокос|мотобур|мотоблок|petrol/.test(group)) return "petrol-tools";
-  if (/сад|газон|garden|город/.test(group)) return "garden-equipment";
-  if (/електро|electric|power|акум/.test(group)) return "power-tools";
-  if (/ручн|hand|слюсар/.test(group)) return "hand-tools";
-  if (/витрат|consumable|аксесуар|запчаст/.test(group)) return "consumables";
-  return "consumables";
-}
-
-/**
- * Infer a category from the product name — used when the export has no category
- * column (as with this УкрСклад CSV). Heuristic and best-effort; genuine parts,
- * oils and accessories fall through to "consumables", which is correct for them.
- */
-function inferCategory(name: string): string {
-  const n = name.toLowerCase();
-  if (/бензопил|мотокос|бензокос|мотобур|мотоблок|бензо/.test(n)) return "petrol-tools";
-  if (/газонокос|аератор|культиватор|обприскувач|секатор|сучкорі|кущорі|тример|коса|садов|газон/.test(n)) {
-    return "garden-equipment";
-  }
-  if (
-    /дриль|шурупов|перфоратор|болгарк|шліфув|лобзик|фрезер|електропил|стабіліз|зарядн|компресор|генератор|зварюв|степлер|електро|акумуляторн/.test(n)
-  ) {
-    return "power-tools";
-  }
-  if (/ключ|викрут|молот|пасатиж|плоскогуб|рулетк|рівень|ножівк|стамеск|лещат|стрем|драбин/.test(n)) {
-    return "hand-tools";
-  }
-  return "consumables";
-}
-
-function resolveImage(rawImage: string): string {
-  if (/^https?:\/\//i.test(rawImage) || rawImage.startsWith("/")) {
-    return rawImage;
-  }
-  // Blob references, empty values, etc. → local placeholder.
-  return LOCAL_PLACEHOLDER;
-}
-
 function normalizeItem(item: RawItem, index: number): Product | null {
   const lookup = toLookup(item);
 
@@ -262,7 +144,7 @@ function normalizeItem(item: RawItem, index: number): Product | null {
       warranty: toText(pick(lookup, FIELD_ALIASES.warranty)),
     },
     imageUrl: resolveImage(toText(pick(lookup, FIELD_ALIASES.image))),
-    categorySlug: KNOWN_SLUGS.has(categorySlug) ? categorySlug : "consumables",
+    categorySlug: safeCategorySlug(categorySlug),
   };
 }
 
@@ -408,7 +290,7 @@ async function resolveSourceFile(configuredPath: string): Promise<string> {
 
 /* ------------------------------- loader --------------------------------- */
 
-export async function loadProducts(): Promise<LoadProductsResult> {
+export async function loadProductsFromFile(): Promise<LoadProductsResult> {
   const loadedAt = new Date().toISOString();
   const configuredPath = process.env.UKR_SKLAD_FILE_PATH?.trim();
 

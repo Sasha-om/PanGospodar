@@ -148,20 +148,24 @@ export default function AdminPage() {
 
               <div
                 className={`mt-4 flex items-center gap-2 rounded-lg border-l-4 px-4 py-2.5 text-sm ${
-                  source === "ukrsklad"
+                  source === "database" || source === "ukrsklad"
                     ? "border-green-500 bg-green-50 text-green-800"
-                    : "border-accent-500 bg-accent-50 text-graphite-700"
+                    : "border-accent-500 bg-accent-50 text-stone-700"
                 }`}
               >
                 <span
                   className={`h-2 w-2 shrink-0 rounded-full ${
-                    source === "ukrsklad" ? "bg-green-500" : "bg-accent-500"
+                    source === "database" || source === "ukrsklad"
+                      ? "bg-green-500"
+                      : "bg-accent-500"
                   }`}
                   aria-hidden="true"
                 />
-                {source === "ukrsklad"
-                  ? "Каталог синхронізовано з обліковою системою УкрСклад."
-                  : "Використовуються резервні дані (файл синхронізації УкрСклад недоступний)."}
+                {source === "database"
+                  ? "Каталог завантажено з бази даних (Neon Postgres)."
+                  : source === "ukrsklad"
+                    ? "Каталог синхронізовано з файлом обліковою системи УкрСклад."
+                    : "Джерело даних недоступне — каталог порожній."}
               </div>
 
               <div className="mt-4 rounded-xl border border-graphite-200 bg-white">

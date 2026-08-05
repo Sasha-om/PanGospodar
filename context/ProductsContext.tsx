@@ -13,7 +13,7 @@ import { products as seedProducts, type Product } from "@/lib/products";
 /** A full product without its generated id (imageUrl is included and editable). */
 export type ProductInput = Omit<Product, "id">;
 
-export type ProductSource = "ukrsklad" | "fallback" | "seed";
+export type ProductSource = "database" | "ukrsklad" | "fallback" | "seed";
 
 /** How often to re-poll the sync feed for fresh prices/stock (ms). */
 const POLL_INTERVAL_MS = 60_000;

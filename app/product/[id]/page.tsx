@@ -2,7 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
-import { loadProducts } from "@/lib/ukrsklad";
+import { loadProducts } from "@/lib/catalog";
 
 // Read the live sync feed on every request so prices/stock are current.
 export const dynamic = "force-dynamic";

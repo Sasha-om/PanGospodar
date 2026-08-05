@@ -1,4 +1,4 @@
-import { loadProducts } from "@/lib/ukrsklad";
+import { loadProducts } from "@/lib/catalog";
 
 // Always read the sync file fresh so updated prices/stock appear on reload.
 export const dynamic = "force-dynamic";
