@@ -121,128 +121,16 @@ export function getSubcategoryBySlug(slug: string): Subcategory | undefined {
   return subcategories.find((sub) => sub.slug === slug);
 }
 
-export const products: Product[] = [
-  {
-    id: "benzotrymer-stihl-fs-55",
-    sku: "00101",
-    name: "Бензотример STIHL FS 55",
-    brand: "STIHL",
-    price: 8499,
-    quantity: 5,
-    inStock: true,
-    rating: 4.8,
-    reviewCount: 24,
-    shortDescription:
-      "Легкий та надійний бензиновий тример для догляду за газоном, дачею та присадибною ділянкою.",
-    techSpecs: {
-      power: "0.8 кВт",
-      weight: "4.5 кг",
-      warranty: "24 місяці",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=STIHL+FS+55",
-    categorySlug: "petrol-tools",
-  },
-  {
-    id: "benzopyla-stihl-ms-180",
-    sku: "00102",
-    name: "Бензопила STIHL MS 180",
-    brand: "STIHL",
-    price: 9999,
-    quantity: 3,
-    inStock: true,
-    rating: 5,
-    reviewCount: 31,
-    shortDescription:
-      "Компактна та надійна побутова бензопила для заготівлі дров, обрізки дерев і робіт на присадибній ділянці.",
-    techSpecs: {
-      power: "1.5 кВт",
-      weight: "3.9 кг",
-      warranty: "24 місяці",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=STIHL+MS+180",
-    categorySlug: "petrol-tools",
-  },
-  {
-    id: "drel-udarna-bosch-gsb-13",
-    sku: "00103",
-    name: "Дриль ударний Bosch GSB 13 RE",
-    brand: "Bosch",
-    price: 2199,
-    quantity: 12,
-    inStock: true,
-    rating: 4.6,
-    reviewCount: 47,
-    shortDescription:
-      "Універсальний ударний дриль для свердління бетону, металу та дерева в побуті та на об'єкті.",
-    techSpecs: {
-      power: "600 Вт",
-      weight: "1.8 кг",
-      warranty: "24 місяці",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=Bosch+GSB+13",
-    categorySlug: "power-tools",
-  },
-  {
-    id: "kutoshlifmashyna-makita-9557",
-    sku: "00104",
-    name: "Кутошліфувальна машина Makita 9557NB",
-    brand: "Makita",
-    price: 1899,
-    quantity: 0,
-    inStock: false,
-    rating: 4.4,
-    reviewCount: 18,
-    shortDescription:
-      "Компактна болгарка для різання та шліфування металу, каменю та плитки.",
-    techSpecs: {
-      power: "840 Вт",
-      weight: "1.9 кг",
-      warranty: "12 місяців",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=Makita+9557",
-    categorySlug: "power-tools",
-  },
-  {
-    id: "gazonokosarka-al-ko-classic-3-82",
-    sku: "00105",
-    name: "Газонокосарка AL-KO Classic 3.82 SE",
-    brand: "AL-KO",
-    price: 15499,
-    quantity: 2,
-    inStock: true,
-    rating: 4.7,
-    reviewCount: 12,
-    shortDescription:
-      "Електрична газонокосарка з травозбірником для акуратного догляду за газоном.",
-    techSpecs: {
-      power: "1.4 кВт",
-      weight: "22 кг",
-      warranty: "24 місяці",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=AL-KO+3.82",
-    categorySlug: "garden-equipment",
-  },
-  {
-    id: "kushchoriz-einhell-gc-hh-9046",
-    sku: "00106",
-    name: "Кущоріз Einhell GC-HH 9046",
-    brand: "Einhell",
-    price: 3299,
-    quantity: 7,
-    inStock: true,
-    rating: 4.5,
-    reviewCount: 9,
-    shortDescription:
-      "Бензиновий кущоріз для формування живоплотів та обрізки чагарників на дачі.",
-    techSpecs: {
-      power: "0.75 кВт",
-      weight: "5.8 кг",
-      warranty: "24 місяці",
-    },
-    imageUrl: "https://placehold.co/600x600/e5e5e5/1a1a1a.png?text=Einhell+9046",
-    categorySlug: "petrol-tools",
-  },
-];
+/**
+ * Product catalog.
+ *
+ * Intentionally EMPTY — products are no longer hardcoded in the codebase.
+ * They are loaded at runtime from the external source (see `lib/ukrsklad.ts`),
+ * and this array is only the last-resort fallback used when that source is
+ * unavailable. Once the database is connected, populate the catalog from there
+ * rather than adding entries here.
+ */
+export const products: Product[] = [];
 
 export function getCategoryBySlug(slug: string): Category | undefined {
   return categories.find((category) => category.slug === slug);

@@ -413,7 +413,8 @@ export async function loadProducts(): Promise<LoadProductsResult> {
   const configuredPath = process.env.UKR_SKLAD_FILE_PATH?.trim();
 
   if (!configuredPath) {
-    const error = "UKR_SKLAD_FILE_PATH is not set — using fallback catalog.";
+    const error =
+      "UKR_SKLAD_FILE_PATH is not set — no product source configured, catalog is empty.";
     console.warn(`[ukrsklad] ${error}`);
     return { products: fallbackProducts, source: "fallback", error, loadedAt };
   }
@@ -431,7 +432,7 @@ export async function loadProducts(): Promise<LoadProductsResult> {
     );
 
     if (normalized.length === 0) {
-      const error = "Sync file parsed but contained no valid products — using fallback.";
+      const error = "Sync file parsed but contained no valid products.";
       console.error(`[ukrsklad] ${error}`);
       return { products: fallbackProducts, source: "fallback", error, loadedAt };
     }

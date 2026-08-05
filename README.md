@@ -1,36 +1,140 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ПанГосподар — інтернет-магазин інструментів
 
-## Getting Started
+Сайт магазину господарських та садових інструментів (смт Ратне, Волинська обл.).
+Побудований на **Next.js 16** (App Router) + **Tailwind CSS 4**, інтерфейс українською.
 
-First, run the development server:
+## Можливості
+
+- **Каталог** з фільтрами (категорія, бренд, ціна, характеристики), сортуванням і пагінацією
+- **Категорії** з мега-меню та підкатегоріями
+- **Сторінка товару** з артикулом, залишками та технічними характеристиками
+- **Кошик** з контролем залишків (не можна замовити більше, ніж є на складі)
+- **Адмін-панель** (`/admin`) — керування каталогом, захищена входом за паролем
+- **Джерело даних** — зовнішній експорт (CSV/XML/JSON) з облікової системи
+
+---
+
+## Локальний запуск
 
 ```bash
+npm install
+cp .env.example .env.local   # заповніть значення
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Відкрийте http://localhost:3000
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Змінні середовища
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Змінна | Обов'язкова | Опис |
+|---|---|---|
+| `SESSION_SECRET` | **так** | Ключ підпису cookie сесії. Згенерувати: `openssl rand -base64 32` |
+| `ADMIN_PASSWORD` | **так** | Пароль до `/admin` |
+| `ADMIN_USERNAME` | ні | Логін адміна (за замовчуванням `admin`) |
+| `UKR_SKLAD_FILE_PATH` | ні | Шлях до файлу вивантаження товарів (лише для локальної роботи) |
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+# 🚀 Як опублікувати сайт в інтернеті
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Зараз сайт працює лише на `localhost`. Щоб він став доступним за реальною
+адресою, потрібно виконати кроки нижче.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## ⚠️ Крок 0. Головне: джерело товарів
 
-## Deploy on Vercel
+**Це найважливіше — без цього каталог у продакшені буде порожній.**
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Зараз товари читаються з **локального файлу на диску** (`UKR_SKLAD_FILE_PATH`,
+напр. `G:/Мій диск/UkrSkladSync`) через `fs/promises` у
+[`lib/ukrsklad.ts`](lib/ukrsklad.ts).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+На хостингу **немає** ані диска `G:`, ані вашого комп'ютера — сервер у хмарі не
+бачить локальні папки. Тому сайт запуститься, але покаже «Товарів поки немає».
+
+**Що з цим робити (оберіть одне):**
+
+1. **База даних** (рекомендовано) — Neon / Supabase / PlanetScale.
+   Замінити читання файлу в `loadProducts()` на запит до БД.
+   Решта коду змін не потребує — усе вже ходить через `/api/products`.
+2. **Файл у репозиторії** — покласти експорт у `sample-data/` і вказати
+   відносний шлях. Просто, але оновлення цін = новий коміт.
+3. **Файл за URL** — залити вивантаження в хмару (S3, Google Drive з
+   прямим посиланням) і завантажувати через `fetch` замість `readFile`.
+
+> Точка входу одна — функція `loadProducts()` у `lib/ukrsklad.ts`.
+> Повертайте масив об'єктів у форматі `Product` — і весь сайт запрацює.
+
+## Крок 1. Обрати хостинг
+
+Проєкту потрібен **Node.js-сервер**. Він використовує `proxy.ts`, API-роути та
+Server Actions, тому **статичні хостинги не підійдуть**:
+
+| Хостинг | Підходить? |
+|---|---|
+| **Vercel** | ✅ Найпростіше (творці Next.js), безкоштовний тариф |
+| Railway / Render / Fly.io | ✅ Так |
+| Власний VPS (Node + nginx) | ✅ Так |
+| **GitHub Pages** | ❌ **Ні** — лише статика, не запускає сервер |
+
+## Крок 2. Деплой на Vercel
+
+1. Зареєструйтеся на https://vercel.com через GitHub
+2. **Add New → Project** → оберіть репозиторій `Sasha-om/PanGospodar`
+3. Vercel сам визначить Next.js. **Root Directory** залиште кореневим
+   (репозиторій уже містить проєкт у корені)
+4. Додайте змінні середовища (розділ **Environment Variables**):
+   - `SESSION_SECRET` — **новий** ключ, згенерований `openssl rand -base64 32`
+   - `ADMIN_PASSWORD` — **новий надійний** пароль
+5. **Deploy**
+
+Через ~2 хвилини отримаєте адресу `https://pangospodar.vercel.app`.
+
+## Крок 3. Власний домен (необов'язково)
+
+У Vercel: **Settings → Domains → Add**. Далі у реєстратора домену прописати
+DNS-записи, які покаже Vercel. HTTPS-сертифікат видається автоматично.
+
+## Крок 4. Перевірка після публікації
+
+- [ ] Головна відкривається за HTTPS
+- [ ] Каталог показує товари (якщо ні — див. **Крок 0**)
+- [ ] `/admin` перекидає на `/login`
+- [ ] Вхід в адмінку працює з новим паролем
+- [ ] Кошик додає товари
+
+---
+
+## 🔒 Безпека перед публікацією
+
+Репозиторій **публічний**, тому обов'язково:
+
+1. **Згенеруйте новий `SESSION_SECRET`** — не використовуйте локальний
+2. **Змініть `ADMIN_PASSWORD`** на надійний
+3. Ніколи не комітьте `.env.local` (він уже в `.gitignore`)
+
+> Cookie сесії має прапорець `secure` у продакшені — сайт **мусить**
+> працювати за HTTPS, інакше вхід в адмінку не спрацює. Vercel дає HTTPS
+> автоматично.
+
+**Важливо:** перевірка залишків зараз відбувається на клієнті. Коли з'явиться
+реальне оформлення замовлень — обов'язково перевіряйте наявність товару ще раз
+на сервері.
+
+## Структура проєкту
+
+```
+app/            сторінки (App Router) + /api/products
+components/     UI-компоненти
+context/        стан кошика та каталогу
+lib/            типи, завантаження товарів, сесії
+proxy.ts        захист /admin (у Next.js 16 замість middleware)
+```
+
+## Команди
+
+```bash
+npm run dev     # локальна розробка
+npm run build   # продакшен-збірка
+npm run start   # запуск продакшен-сервера
+npm run lint    # перевірка коду
+```

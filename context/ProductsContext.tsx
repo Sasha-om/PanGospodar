@@ -44,13 +44,12 @@ function makeId(): string {
 }
 
 /**
- * Catalog state, sourced from the УкрСклад sync feed (`/api/products`).
+ * Catalog state, fetched from `/api/products`.
  *
- * The catalog is NOT stored in localStorage — it is fetched from the server on
- * mount and re-polled so prices/stock stay current. Initial render uses the
- * seed catalog (deterministic, SSR-safe) purely as a placeholder until the
- * first fetch resolves. Admin edits are in-memory only (УкрСклад is the source
- * of truth); a refresh/reload re-reads the live feed.
+ * There are no hardcoded products: the initial value is an empty array and the
+ * real catalog arrives from the server on mount, then is re-polled so prices
+ * and stock stay current. Admin edits are in-memory only (the external source
+ * is the source of truth); a refresh/reload re-reads the live feed.
  */
 export function ProductsProvider({
   children,
