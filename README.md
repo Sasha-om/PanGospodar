@@ -28,7 +28,7 @@ npm run dev
 
 | Змінна | Обов'язкова | Опис |
 |---|---|---|
-| `POSTGRES_URL` | **так** | Рядок підключення до Neon (додає інтеграція Vercel). Також читаються `STORAGE_URL`, `DATABASE_URL` |
+| `STORAGE_DATABASE_URL` | **так** | Рядок підключення до Neon (додає інтеграція Vercel). Перевіряються також `STORAGE_POSTGRES_URL`, `POSTGRES_URL`, `DATABASE_URL` та ін. |
 | `IMPORT_TOKEN` | **так** | Спільний секрет для `/api/import-stock`. Згенерувати: `openssl rand -hex 32` |
 | `SESSION_SECRET` | **так** | Ключ підпису cookie сесії. Згенерувати: `openssl rand -base64 32` |
 | `ADMIN_PASSWORD` | **так** | Пароль до `/admin` |

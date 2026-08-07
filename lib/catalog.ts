@@ -1,5 +1,5 @@
 import type { Product } from "@/lib/products";
-import { hasDatabase, loadProductsFromDb } from "@/lib/db";
+import { getConnectionSource, hasDatabase, loadProductsFromDb } from "@/lib/db";
 import { loadProductsFromFile } from "@/lib/ukrsklad";
 
 /**
@@ -28,7 +28,9 @@ export async function loadProducts(): Promise<LoadProductsResult> {
   if (hasDatabase()) {
     try {
       const products = await loadProductsFromDb();
-      console.info(`[catalog] Loaded ${products.length} products from Postgres`);
+      console.info(
+        `[catalog] Loaded ${products.length} products from Postgres (via ${getConnectionSource()})`,
+      );
       return { products, source: "database", loadedAt };
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);

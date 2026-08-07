@@ -14,22 +14,30 @@ import {
  * expose `STORAGE_URL` or `DATABASE_URL` instead.
  */
 
-const CONNECTION_ENV_VARS = [
+/**
+ * Checked in order. The Vercel↔Neon integration on this project provisions the
+ * `STORAGE_`-prefixed names, so those come first; the unprefixed variants are
+ * kept for other setups and local development.
+ */
+export const CONNECTION_ENV_VARS = [
+  "STORAGE_DATABASE_URL",
+  "STORAGE_POSTGRES_URL",
+  "STORAGE_POSTGRES_URL_NON_POOLING",
   "POSTGRES_URL",
-  "STORAGE_URL",
   "DATABASE_URL",
+  "STORAGE_URL",
   "POSTGRES_URL_NON_POOLING",
   "POSTGRES_PRISMA_URL",
 ] as const;
 
+/** Name of the env var that supplied the connection string (for diagnostics). */
+export function getConnectionSource(): string | undefined {
+  return CONNECTION_ENV_VARS.find((key) => process.env[key]?.trim());
+}
+
 export function getConnectionString(): string | undefined {
-  for (const key of CONNECTION_ENV_VARS) {
-    const value = process.env[key]?.trim();
-    if (value) {
-      return value;
-    }
-  }
-  return undefined;
+  const key = getConnectionSource();
+  return key ? process.env[key]?.trim() : undefined;
 }
 
 /** True when a Postgres connection string is configured. */

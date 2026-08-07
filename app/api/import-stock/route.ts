@@ -1,4 +1,10 @@
-import { ensureProductsTable, hasDatabase, upsertProducts, type ImportItem } from "@/lib/db";
+import {
+  CONNECTION_ENV_VARS,
+  ensureProductsTable,
+  hasDatabase,
+  upsertProducts,
+  type ImportItem,
+} from "@/lib/db";
 
 /**
  * POST /api/import-stock
@@ -108,9 +114,17 @@ export async function POST(request: Request) {
   }
 
   if (!hasDatabase()) {
-    console.error("[import-stock] No database connection string configured");
+    console.error(
+      `[import-stock] No connection string. Checked: ${CONNECTION_ENV_VARS.join(", ")}`,
+    );
     return json(
-      { success: false, error: "Database is not configured." },
+      {
+        success: false,
+        error: "Database is not configured.",
+        // Names only — never the values. Makes a misconfiguration obvious
+        // from the response instead of requiring a look at the source.
+        checkedEnvVars: CONNECTION_ENV_VARS,
+      },
       500,
     );
   }
