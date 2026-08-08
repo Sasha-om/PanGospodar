@@ -1,7 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import StarRating from "@/components/StarRating";
-import type { Product } from "@/lib/products";
+import { getProductAttributes, type Product } from "@/lib/products";
 
 /** Compact, flat marketplace-style card tuned for a 4-per-row desktop grid. */
 export default function ProductCard({
@@ -14,13 +14,8 @@ export default function ProductCard({
   const inStock = product.inStock !== false;
   const sku = product.sku ?? product.id;
 
-  // Show the most useful spec we actually have (УкрСклад rows often have none).
-  const keySpec =
-    [
-      { label: "Потужність", value: product.techSpecs.power },
-      { label: "Вага", value: product.techSpecs.weight },
-      { label: "Гарантія", value: product.techSpecs.warranty },
-    ].find((row) => row.value.trim() !== "") ?? null;
+  // Show the first characteristic we actually have (many rows have none).
+  const keySpec = getProductAttributes(product)[0] ?? null;
 
   return (
     <Link
@@ -78,10 +73,8 @@ export default function ProductCard({
 
         {keySpec ? (
           <p className="text-[11px] text-stone-500">
-            <span className="font-semibold text-stone-600">
-              {keySpec.label}:
-            </span>{" "}
-            {keySpec.value}
+            <span className="font-semibold text-stone-600">{keySpec[0]}:</span>{" "}
+            {keySpec[1]}
           </p>
         ) : null}
 

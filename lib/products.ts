@@ -39,8 +39,41 @@ export interface Product {
   reviewCount?: number;
   shortDescription: string;
   techSpecs: ProductTechSpecs;
+  /**
+   * Arbitrary product characteristics, editable in the admin panel and stored
+   * in the `products.attributes` JSONB column. Keys are the labels shown to
+   * customers ("Потужність"), values are free text ("1.5 кВт"). These feed the
+   * dynamic catalog filters.
+   */
+  attributes?: Record<string, string>;
   imageUrl: string;
   categorySlug: string;
+}
+
+/**
+ * All characteristics of a product as label/value pairs: the legacy fixed
+ * `techSpecs` merged with the free-form `attributes`. Empty values are dropped.
+ */
+export function getProductAttributes(product: Product): [string, string][] {
+  const merged = new Map<string, string>();
+
+  const legacy: [string, string][] = [
+    ["Потужність", product.techSpecs?.power ?? ""],
+    ["Вага", product.techSpecs?.weight ?? ""],
+    ["Гарантія", product.techSpecs?.warranty ?? ""],
+  ];
+
+  for (const [label, value] of legacy) {
+    if (value.trim()) merged.set(label, value.trim());
+  }
+  // Free-form attributes win over the legacy fields on a label clash.
+  for (const [label, value] of Object.entries(product.attributes ?? {})) {
+    const key = label.trim();
+    const val = String(value ?? "").trim();
+    if (key && val) merged.set(key, val);
+  }
+
+  return [...merged.entries()];
 }
 
 export const categories: Category[] = [

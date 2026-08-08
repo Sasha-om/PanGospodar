@@ -56,6 +56,19 @@ export default function AdminPage() {
   const [editing, setEditing] = useState<Product | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Product | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  /** Run a database write and surface any failure instead of swallowing it. */
+  async function runSave(action: () => Promise<void>) {
+    setSaveError(null);
+    try {
+      await action();
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setSaveError(`Не вдалося зберегти: ${message}`);
+      window.setTimeout(() => setSaveError(null), 6000);
+    }
+  }
 
   const filteredProducts = useMemo(() => {
     const search = query.trim().toLowerCase();
@@ -381,6 +394,13 @@ export default function AdminPage() {
         </main>
       </div>
 
+      {/* Save/delete failures surface here instead of silently doing nothing. */}
+      {saveError ? (
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-sm border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 shadow-lg">
+          {saveError}
+        </div>
+      ) : null}
+
       {/* Edit product */}
       {editing ? (
         <ProductFormModal
@@ -389,8 +409,9 @@ export default function AdminPage() {
           initialValues={toFormValues(editing)}
           onClose={() => setEditing(null)}
           onSubmit={(draft) => {
-            updateProduct({ ...editing, ...draft });
+            const target = editing;
             setEditing(null);
+            void runSave(() => updateProduct({ ...target, ...draft }));
           }}
         />
       ) : null}
@@ -403,8 +424,8 @@ export default function AdminPage() {
           initialValues={EMPTY_PRODUCT_FORM}
           onClose={() => setCreating(false)}
           onSubmit={(draft) => {
-            createProduct(draft);
             setCreating(false);
+            void runSave(() => createProduct(draft));
           }}
         />
       ) : null}
@@ -414,12 +435,13 @@ export default function AdminPage() {
         <ConfirmDialog
           tone="danger"
           title="Видалити товар?"
-          message={`Ви впевнені, що хочете видалити цей товар? «${deleting.name}» буде вилучено з поточного перегляду каталогу.`}
+          message={`Ви впевнені, що хочете видалити цей товар? «${deleting.name}» буде безповоротно вилучено з бази даних.`}
           confirmLabel="Видалити"
           onCancel={() => setDeleting(null)}
           onConfirm={() => {
-            deleteProduct(deleting.id);
+            const target = deleting;
             setDeleting(null);
+            void runSave(() => deleteProduct(target.sku ?? target.id));
           }}
         />
       ) : null}

@@ -4,6 +4,7 @@ import {
   LOCAL_PLACEHOLDER,
   detectBrand,
   inferCategory,
+  safeCategorySlug,
 } from "@/lib/product-mapping";
 
 /**
@@ -61,6 +62,28 @@ interface ProductRow {
   name: string;
   price: string | number | null;
   stock: string | number | null;
+  attributes: Record<string, unknown> | null;
+  category: string | null;
+  brand: string | null;
+  image_url: string | null;
+}
+
+/** Keep only non-empty string pairs — the UI and filters assume clean data. */
+export function sanitizeAttributes(
+  raw: unknown,
+): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const label = key.trim();
+    const text = String(value ?? "").trim();
+    if (label && text) {
+      clean[label] = text;
+    }
+  }
+  return clean;
 }
 
 function toNumber(value: string | number | null): number {
@@ -83,25 +106,47 @@ export async function ensureProductsTable(): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now()
     )
   `;
+  // Added after the initial release — safe to run on existing databases.
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS attributes jsonb NOT NULL DEFAULT '{}'::jsonb
+  `;
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS category text
+  `;
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS brand text
+  `;
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS image_url text
+  `;
 }
 
 /** Map a database row onto the site's `Product` shape. */
 function rowToProduct(row: ProductRow): Product {
   const name = (row.name ?? "").trim();
   const quantity = Math.max(0, Math.round(toNumber(row.stock)));
+  const storedCategory = (row.category ?? "").trim();
+  const storedBrand = (row.brand ?? "").trim();
+  const storedImage = (row.image_url ?? "").trim();
 
   return {
     id: row.sku,
     sku: row.sku,
     name,
-    brand: detectBrand("", name),
+    // An admin-set value wins; otherwise fall back to inference from the name.
+    brand: storedBrand || detectBrand("", name),
     price: toNumber(row.price),
     quantity,
     inStock: quantity > 0,
     shortDescription: "",
     techSpecs: { power: "", weight: "", warranty: "" },
-    imageUrl: LOCAL_PLACEHOLDER,
-    categorySlug: inferCategory(name),
+    attributes: sanitizeAttributes(row.attributes),
+    imageUrl: storedImage || LOCAL_PLACEHOLDER,
+    categorySlug: safeCategorySlug(storedCategory || inferCategory(name)),
   };
 }
 
@@ -109,7 +154,7 @@ function rowToProduct(row: ProductRow): Product {
 export async function loadProductsFromDb(): Promise<Product[]> {
   const sql = getSql();
   const rows = (await sql`
-    SELECT sku, name, price, stock
+    SELECT sku, name, price, stock, attributes, category, brand, image_url
     FROM products
     ORDER BY name
   `) as ProductRow[];
@@ -117,6 +162,62 @@ export async function loadProductsFromDb(): Promise<Product[]> {
   return rows
     .filter((row) => row.sku && (row.name ?? "").trim() !== "")
     .map(rowToProduct);
+}
+
+export interface AdminProductUpdate {
+  sku: string;
+  name: string;
+  brand: string;
+  category: string;
+  price: number;
+  stock: number;
+  imageUrl: string;
+  attributes: Record<string, string>;
+}
+
+/**
+ * Persist admin edits for a single product.
+ *
+ * Only the columns the admin form owns are written; `updated_at` is refreshed.
+ * The УкрСклад import keeps overwriting name/price/stock on its next run — the
+ * admin-owned columns (brand, category, image_url, attributes) are never
+ * touched by that import, so they survive synchronization.
+ */
+export async function updateProductFromAdmin(
+  update: AdminProductUpdate,
+): Promise<void> {
+  const sql = getSql();
+  await sql`
+    INSERT INTO products (
+      sku, name, price, stock, brand, category, image_url, attributes, updated_at
+    )
+    VALUES (
+      ${update.sku},
+      ${update.name},
+      ${update.price},
+      ${update.stock},
+      ${update.brand},
+      ${update.category},
+      ${update.imageUrl},
+      ${JSON.stringify(update.attributes)}::jsonb,
+      now()
+    )
+    ON CONFLICT (sku) DO UPDATE SET
+      name       = EXCLUDED.name,
+      price      = EXCLUDED.price,
+      stock      = EXCLUDED.stock,
+      brand      = EXCLUDED.brand,
+      category   = EXCLUDED.category,
+      image_url  = EXCLUDED.image_url,
+      attributes = EXCLUDED.attributes,
+      updated_at = now()
+  `;
+}
+
+/** Remove a product entirely. */
+export async function deleteProductBySku(sku: string): Promise<void> {
+  const sql = getSql();
+  await sql`DELETE FROM products WHERE sku = ${sku}`;
 }
 
 export interface ImportItem {

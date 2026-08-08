@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import { loadProducts } from "@/lib/catalog";
+import { getProductAttributes } from "@/lib/products";
 
 // Read the live sync feed on every request so prices/stock are current.
 export const dynamic = "force-dynamic";
@@ -29,11 +30,11 @@ export default async function ProductPage({
       : inStock
         ? undefined
         : 0;
-  const specRows = [
-    { label: "Потужність", value: product.techSpecs.power },
-    { label: "Вага", value: product.techSpecs.weight },
-    { label: "Гарантія", value: product.techSpecs.warranty },
-  ].filter((row) => row.value.trim() !== "");
+  // Legacy techSpecs merged with the free-form attributes set in the admin.
+  const specRows = getProductAttributes(product).map(([label, value]) => ({
+    label,
+    value,
+  }));
 
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-orange-100/50 to-stone-100">

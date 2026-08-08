@@ -23,11 +23,12 @@ interface ProductsContextValue {
   loading: boolean;
   error: string | null;
   source: ProductSource;
-  /** Re-fetch the catalog from the УкрСклад sync feed. */
+  /** Re-fetch the catalog from the server. */
   refresh: () => Promise<void>;
-  updateProduct: (product: Product) => void;
-  deleteProduct: (id: string) => void;
-  createProduct: (input: ProductInput) => void;
+  /** Persist to the database, then refresh. Throws on failure. */
+  updateProduct: (product: Product) => Promise<void>;
+  deleteProduct: (id: string) => Promise<void>;
+  createProduct: (input: ProductInput) => Promise<void>;
 }
 
 const ProductsContext = createContext<ProductsContextValue | undefined>(
@@ -48,8 +49,8 @@ function makeId(): string {
  *
  * There are no hardcoded products: the initial value is an empty array and the
  * real catalog arrives from the server on mount, then is re-polled so prices
- * and stock stay current. Admin edits are in-memory only (the external source
- * is the source of truth); a refresh/reload re-reads the live feed.
+ * and stock stay current. Admin edits are written to the database through
+ * `/api/admin/products` and the catalog is re-read afterwards.
  */
 export function ProductsProvider({
   children,
@@ -96,27 +97,63 @@ export function ProductsProvider({
     return () => clearInterval(timer);
   }, [refresh]);
 
-  // Admin edits operate on the in-memory catalog for the current session only.
-  const updateProduct = useCallback((updated: Product) => {
-    setProducts((prev) =>
-      prev.map((item) => (item.id === updated.id ? updated : item)),
-    );
-  }, []);
+  /** POST an admin edit to the database, then re-read the catalog. */
+  const saveProduct = useCallback(
+    async (product: Product) => {
+      const response = await fetch("/api/admin/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sku: product.sku ?? product.id,
+          name: product.name,
+          brand: product.brand,
+          category: product.categorySlug,
+          price: product.price,
+          stock: product.quantity ?? 0,
+          imageUrl: product.imageUrl,
+          attributes: product.attributes ?? {},
+        }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.error ?? `HTTP ${response.status}`);
+      }
+      await refresh();
+    },
+    [refresh],
+  );
 
-  const deleteProduct = useCallback((id: string) => {
-    setProducts((prev) => prev.filter((item) => item.id !== id));
-  }, []);
+  const updateProduct = useCallback(
+    (updated: Product) => saveProduct(updated),
+    [saveProduct],
+  );
 
-  const createProduct = useCallback((input: ProductInput) => {
-    setProducts((prev) => [
-      {
+  const createProduct = useCallback(
+    (input: ProductInput) =>
+      saveProduct({
         ...input,
-        id: makeId(),
+        // A new product needs an article; derive one when the admin has none.
+        id: input.sku?.trim() || makeId(),
+        sku: input.sku?.trim() || makeId(),
         imageUrl: input.imageUrl.trim() || placeholderImage(input.name),
-      },
-      ...prev,
-    ]);
-  }, []);
+      }),
+    [saveProduct],
+  );
+
+  const deleteProduct = useCallback(
+    async (id: string) => {
+      const response = await fetch(
+        `/api/admin/products?sku=${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.error ?? `HTTP ${response.status}`);
+      }
+      await refresh();
+    },
+    [refresh],
+  );
 
   const value = useMemo(
     () => ({

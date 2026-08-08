@@ -6,7 +6,11 @@ import { useMemo, useState } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
 import ProductCard from "@/components/ProductCard";
 import { useProducts } from "@/context/ProductsContext";
-import { categories, getSubcategoryBySlug } from "@/lib/products";
+import {
+  categories,
+  getProductAttributes,
+  getSubcategoryBySlug,
+} from "@/lib/products";
 
 const SORT_OPTIONS = [
   { value: "default", label: "За замовчуванням" },
@@ -114,42 +118,24 @@ export default function CatalogBrowser({
     setSelectedCategories(categoryParam ? [categoryParam] : []);
   }
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
-  const [selectedPower, setSelectedPower] = useState<string[]>([]);
-  const [selectedWeight, setSelectedWeight] = useState<string[]>([]);
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [sort, setSort] = useState<SortValue>("default");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
 
-  const categoryOptions = useMemo<FilterOption[]>(() => {
-    if (!showCategoryFilter) {
-      return [];
-    }
-    const present = new Set(products.map((product) => product.categorySlug));
-    return categories
-      .filter((category) => present.has(category.slug))
-      .map((category) => ({ value: category.slug, label: category.name }));
-  }, [products, showCategoryFilter]);
-
-  const brandOptions = useMemo(
-    () => toOptions(products.map((product) => product.brand).filter(Boolean)),
-    [products],
-  );
-  const powerOptions = useMemo(
-    () => toOptions(products.map((product) => product.techSpecs.power)),
-    [products],
-  );
-  const weightOptions = useMemo(
-    () => toOptions(products.map((product) => product.techSpecs.weight)),
-    [products],
-  );
-
-  const visibleProducts = useMemo(() => {
-    const min = minPrice.trim() ? Number(minPrice) : null;
-    const max = maxPrice.trim() ? Number(maxPrice) : null;
-
-    const filtered = products.filter((product) => {
+  /**
+   * Products in the current *scope*: category (from the URL or the page prop),
+   * subcategory and search query — but NOT the sidebar selections. Filter
+   * options are derived from this, so the sidebar only ever offers values that
+   * exist in the category the customer is looking at, and it recomputes as
+   * soon as the category changes.
+   */
+  const scopedProducts = useMemo(() => {
+    return products.filter((product) => {
+      if (categoryParam && product.categorySlug !== categoryParam) {
+        return false;
+      }
       if (subRegex && !subRegex.test(product.name)) {
         return false;
       }
@@ -160,6 +146,71 @@ export default function CatalogBrowser({
       ) {
         return false;
       }
+      return true;
+    });
+  }, [products, categoryParam, subRegex, query]);
+
+  const categoryOptions = useMemo<FilterOption[]>(() => {
+    if (!showCategoryFilter) {
+      return [];
+    }
+    // The category list itself must not collapse to the selected category,
+    // so it is built from everything the search/subcategory scope allows.
+    const present = new Set(products.map((product) => product.categorySlug));
+    return categories
+      .filter((category) => present.has(category.slug))
+      .map((category) => ({ value: category.slug, label: category.name }));
+  }, [products, showCategoryFilter]);
+
+  const brandOptions = useMemo(
+    () =>
+      toOptions(scopedProducts.map((product) => product.brand).filter(Boolean)),
+    [scopedProducts],
+  );
+
+  /**
+   * Attribute filter groups, built from the characteristics that actually occur
+   * in the scoped products. Nothing is hardcoded — a new characteristic added
+   * in the admin panel becomes a filter automatically.
+   */
+  const attributeGroups = useMemo(() => {
+    const byLabel = new Map<string, Set<string>>();
+    for (const product of scopedProducts) {
+      for (const [label, value] of getProductAttributes(product)) {
+        const bucket = byLabel.get(label) ?? new Set<string>();
+        bucket.add(value);
+        byLabel.set(label, bucket);
+      }
+    }
+    return [...byLabel.entries()]
+      // A characteristic shared by every product filters nothing — hide it.
+      .filter(([, values]) => values.size > 1)
+      .sort(([a], [b]) => a.localeCompare(b, "uk"))
+      .map(([label, values]) => ({ label, options: toOptions([...values]) }));
+  }, [scopedProducts]);
+
+  // Selected attribute values, keyed by characteristic label.
+  const [selectedAttributes, setSelectedAttributes] = useState<
+    Record<string, string[]>
+  >({});
+
+  function toggleAttribute(label: string, value: string) {
+    setSelectedAttributes((prev) => {
+      const next = toggleValue(prev[label] ?? [], value);
+      if (next.length === 0) {
+        const rest = { ...prev };
+        delete rest[label];
+        return rest;
+      }
+      return { ...prev, [label]: next };
+    });
+  }
+
+  const visibleProducts = useMemo(() => {
+    const min = minPrice.trim() ? Number(minPrice) : null;
+    const max = maxPrice.trim() ? Number(maxPrice) : null;
+
+    const filtered = scopedProducts.filter((product) => {
       if (
         selectedCategories.length &&
         !selectedCategories.includes(product.categorySlug)
@@ -169,23 +220,21 @@ export default function CatalogBrowser({
       if (selectedBrands.length && !selectedBrands.includes(product.brand)) {
         return false;
       }
-      if (
-        selectedPower.length &&
-        !selectedPower.includes(product.techSpecs.power)
-      ) {
-        return false;
-      }
-      if (
-        selectedWeight.length &&
-        !selectedWeight.includes(product.techSpecs.weight)
-      ) {
-        return false;
-      }
       if (min !== null && !Number.isNaN(min) && product.price < min) {
         return false;
       }
       if (max !== null && !Number.isNaN(max) && product.price > max) {
         return false;
+      }
+      const attributeEntries = Object.entries(selectedAttributes);
+      if (attributeEntries.length > 0) {
+        const own = new Map(getProductAttributes(product));
+        for (const [label, values] of attributeEntries) {
+          const current = own.get(label);
+          if (!current || !values.includes(current)) {
+            return false;
+          }
+        }
       }
       return true;
     });
@@ -201,13 +250,10 @@ export default function CatalogBrowser({
         return filtered;
     }
   }, [
-    products,
-    subRegex,
-    query,
+    scopedProducts,
     selectedCategories,
     selectedBrands,
-    selectedPower,
-    selectedWeight,
+    selectedAttributes,
     minPrice,
     maxPrice,
     sort,
@@ -216,16 +262,17 @@ export default function CatalogBrowser({
   const activeFilterCount =
     selectedCategories.length +
     selectedBrands.length +
-    selectedPower.length +
-    selectedWeight.length +
+    Object.values(selectedAttributes).reduce(
+      (sum, values) => sum + values.length,
+      0,
+    ) +
     (minPrice.trim() ? 1 : 0) +
     (maxPrice.trim() ? 1 : 0);
 
   function resetFilters() {
     setSelectedCategories([]);
     setSelectedBrands([]);
-    setSelectedPower([]);
-    setSelectedWeight([]);
+    setSelectedAttributes({});
     setMinPrice("");
     setMaxPrice("");
   }
@@ -329,23 +376,16 @@ export default function CatalogBrowser({
           </div>
         </fieldset>
 
-        <FilterGroup
-          legend="Потужність"
-          options={powerOptions}
-          selected={selectedPower}
-          onToggle={(value) =>
-            setSelectedPower((prev) => toggleValue(prev, value))
-          }
-        />
-
-        <FilterGroup
-          legend="Вага"
-          options={weightOptions}
-          selected={selectedWeight}
-          onToggle={(value) =>
-            setSelectedWeight((prev) => toggleValue(prev, value))
-          }
-        />
+        {/* Characteristic filters, generated from the products in scope. */}
+        {attributeGroups.map((group) => (
+          <FilterGroup
+            key={group.label}
+            legend={group.label}
+            options={group.options}
+            selected={selectedAttributes[group.label] ?? []}
+            onToggle={(value) => toggleAttribute(group.label, value)}
+          />
+        ))}
       </aside>
 
       <div>

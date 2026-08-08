@@ -83,14 +83,6 @@ function NavBar({ activeKey }: { activeKey: string }) {
                         {sub.name}
                       </Link>
                     ))}
-                    <Link
-                      href={categoryHref(item.slug)}
-                      className={`block rounded-sm px-3 py-1.5 text-sm font-bold text-accent-600 transition-colors duration-100 hover:bg-accent-50 ${
-                        item.subs.length > 3 ? "col-span-2" : ""
-                      }`}
-                    >
-                      Усі товари категорії →
-                    </Link>
                   </div>
                 </div>
               ) : null}

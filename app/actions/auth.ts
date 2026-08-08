@@ -37,19 +37,32 @@ export async function login(
   const password = String(formData.get("password") ?? "");
   const redirectTo = safeRedirectTarget(formData.get("from"));
 
-  const expectedUser = process.env.ADMIN_USERNAME ?? "admin";
-  const expectedPass = process.env.ADMIN_PASSWORD;
+  const expectedUser = process.env.ADMIN_USERNAME?.trim() || "admin";
+  const expectedPass = process.env.ADMIN_PASSWORD?.trim();
+  const sessionSecret = process.env.SESSION_SECRET?.trim();
 
-  if (!expectedPass) {
+  // Both are required. SESSION_SECRET is checked up front because
+  // createSession() would otherwise throw *after* a correct password,
+  // surfacing as an opaque server error.
+  const missing = [
+    expectedPass ? null : "ADMIN_PASSWORD",
+    sessionSecret ? null : "SESSION_SECRET",
+  ].filter((name): name is string => name !== null);
+
+  if (missing.length > 0) {
+    console.error(`[auth] Missing environment variables: ${missing.join(", ")}`);
     return {
       error:
-        "Сервер не налаштовано: відсутня змінна ADMIN_PASSWORD. Додайте її у .env.local.",
+        `Сервер не налаштовано: відсутн${missing.length > 1 ? "і змінні" : "я змінна"} ` +
+        `${missing.join(", ")}. Додайте ${missing.length > 1 ? "їх" : "її"} у Vercel → ` +
+        "Settings → Environment Variables і зробіть Redeploy " +
+        "(для локальної роботи — у .env.local).",
     };
   }
 
   // Evaluate both comparisons regardless, so timing does not reveal which failed.
   const userOk = timingSafeEqual(username, expectedUser);
-  const passOk = timingSafeEqual(password, expectedPass);
+  const passOk = timingSafeEqual(password, expectedPass!);
   if (!userOk || !passOk) {
     return { error: "Невірний логін або пароль." };
   }
