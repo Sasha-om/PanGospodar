@@ -271,6 +271,103 @@ export async function deleteProductBySku(sku: string): Promise<void> {
   await sql`DELETE FROM products WHERE sku = ${sku}`;
 }
 
+export interface AdminSearchResult {
+  products: Product[];
+  /** Total rows matching the query, for paging and the stat card. */
+  total: number;
+}
+
+/** Escape LIKE wildcards so a literal % or _ in the query is not a wildcard. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+/**
+ * Paged admin catalog search, executed in Postgres.
+ *
+ * The admin list previously filtered the whole catalog in the browser, which
+ * meant shipping every row to the client and re-scanning it on each keystroke.
+ * Here the database does the work and returns at most `limit` rows.
+ *
+ * `SELECT *` is deliberate: a fixed column list breaks on a database that has
+ * not been migrated yet (that bug emptied the catalog once already), and with
+ * LIMIT 20 the column list costs nothing next to the 4700-row saving.
+ */
+export async function searchProductsForAdmin({
+  query,
+  limit = 20,
+  offset = 0,
+}: {
+  query: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AdminSearchResult> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 100);
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const trimmed = query.trim();
+
+  const run = async (): Promise<AdminSearchResult> => {
+    if (!trimmed) {
+      // No query: most recently touched products first.
+      const rows = (await sql`
+        SELECT * FROM products
+        ORDER BY updated_at DESC NULLS LAST, name
+        LIMIT ${safeLimit} OFFSET ${safeOffset}
+      `) as ProductRow[];
+      const countRows = (await sql`
+        SELECT COUNT(*)::int AS total FROM products
+      `) as { total: number }[];
+      return {
+        products: rows.filter((r) => r.sku).map(rowToProduct),
+        total: countRows[0]?.total ?? 0,
+      };
+    }
+
+    const pattern = `%${escapeLike(trimmed)}%`;
+    // Digits-only variant so a scanned barcode with spaces/dashes still matches.
+    const digits = trimmed.replace(/[^0-9]/g, "");
+    const digitPattern = digits ? `%${digits}%` : null;
+
+    // A factory, not a shared value: each query gets its own fragment so the
+    // two statements never share one lazy query object.
+    const whereClause = () => sql`
+      name ILIKE ${pattern}
+      OR sku ILIKE ${pattern}
+      OR brand ILIKE ${pattern}
+      OR barcode ILIKE ${pattern}
+      OR (${digitPattern}::text IS NOT NULL
+          AND regexp_replace(COALESCE(barcode, ''), '[^0-9]', '', 'g') ILIKE ${digitPattern})
+    `;
+
+    const rows = (await sql`
+      SELECT * FROM products
+      WHERE ${whereClause()}
+      ORDER BY updated_at DESC NULLS LAST, name
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `) as ProductRow[];
+    const countRows = (await sql`
+      SELECT COUNT(*)::int AS total FROM products WHERE ${whereClause()}
+    `) as { total: number }[];
+
+    return {
+      products: rows.filter((r) => r.sku).map(rowToProduct),
+      total: countRows[0]?.total ?? 0,
+    };
+  };
+
+  try {
+    return await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) {
+      throw caught;
+    }
+    console.warn("[db] products schema missing — running migration and retrying");
+    await ensureProductsTable();
+    return run();
+  }
+}
+
 export interface ImportItem {
   sku: string;
   name: string;

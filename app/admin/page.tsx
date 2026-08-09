@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Inbox,
+  Loader2,
   LogOut,
   Package,
   Pencil,
@@ -20,11 +21,15 @@ import ProductFormModal, {
   toFormValues,
 } from "@/components/admin/ProductFormModal";
 import { useProducts } from "@/context/ProductsContext";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   categories,
   productMatchesQuery,
   type Product,
 } from "@/lib/products";
+
+/** Rows fetched/rendered per page — the admin list is never unbounded. */
+const PAGE_SIZE = 20;
 
 const SECTIONS = [
   { id: "products", label: "Товари", icon: Package },
@@ -67,6 +72,8 @@ export default function AdminPage() {
     setSaveError(null);
     try {
       await action();
+      // Reload the current page of results so the table reflects the change.
+      setRefreshToken((token) => token + 1);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       setSaveError(`Не вдалося зберегти: ${message}`);
@@ -74,23 +81,110 @@ export default function AdminPage() {
     }
   }
 
-  const filteredProducts = useMemo(() => {
-    const search = query.trim();
+  // Typing updates `query` instantly (the input stays responsive); the search
+  // itself only runs once typing pauses.
+  const debouncedQuery = useDebouncedValue(query, 350);
+
+  const [rows, setRows] = useState<Product[] | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+  /** Size of the whole catalog, captured when no query is active. */
+  const [catalogTotal, setCatalogTotal] = useState<number | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [serverSearch, setServerSearch] = useState(true);
+  /** Bumped after a save/delete to force the list to reload. */
+  const [refreshToken, setRefreshToken] = useState(0);
+
+  // Reset paging whenever the query changes.
+  const [syncedQuery, setSyncedQuery] = useState(debouncedQuery);
+  if (debouncedQuery !== syncedQuery) {
+    setSyncedQuery(debouncedQuery);
+    setPageSize(PAGE_SIZE);
+  }
+
+  useEffect(() => {
+    if (!serverSearch) {
+      return;
+    }
+    const controller = new AbortController();
+    // Data fetching is a valid effect; the synchronous progress flag it sets
+    // is intentional and drives the spinner in the search field.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSearching(true);
+
+    const params = new URLSearchParams({
+      q: debouncedQuery.trim(),
+      limit: String(pageSize),
+    });
+
+    fetch(`/api/admin/products/search?${params}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (response.status === 503) {
+          // No database (local file source) — fall back to filtering in memory.
+          setServerSearch(false);
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const data = (await response.json()) as {
+          products: Product[];
+          total: number;
+        };
+        setRows(data.products);
+        setTotal(data.total);
+        // Only an unfiltered result reflects the size of the whole catalog.
+        if (debouncedQuery.trim() === "") {
+          setCatalogTotal(data.total);
+        }
+      })
+      .catch((caught: unknown) => {
+        if ((caught as Error)?.name === "AbortError") {
+          return;
+        }
+        console.error("[admin] Search failed:", caught);
+        setServerSearch(false);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setSearching(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [debouncedQuery, pageSize, serverSearch, refreshToken]);
+
+  /** Client-side fallback used only when the database is unavailable. */
+  const clientFiltered = useMemo(() => {
+    if (serverSearch) {
+      return [];
+    }
+    const search = debouncedQuery.trim();
     if (!search) {
       return products;
     }
     const lowered = search.toLowerCase();
     return products.filter(
       (product) =>
-        // Name, description, article and barcode…
         productMatchesQuery(product, search) ||
-        // …plus brand, which only matters in the admin table.
         product.brand.toLowerCase().includes(lowered),
     );
-  }, [products, query]);
+  }, [serverSearch, products, debouncedQuery]);
+
+  const visibleProducts = serverSearch
+    ? (rows ?? [])
+    : clientFiltered.slice(0, pageSize);
+  const matchCount = serverSearch ? (total ?? 0) : clientFiltered.length;
+  const hasMore = visibleProducts.length < matchCount;
 
   const stats = [
-    { label: "Товарів у каталозі", value: String(products.length) },
+    {
+      label: "Товарів у каталозі",
+      value: String(serverSearch ? (catalogTotal ?? 0) : products.length),
+    },
     { label: "Категорій", value: String(categories.length) },
     { label: "Замовлень", value: "0" },
   ];
@@ -208,8 +302,18 @@ export default function AdminPage() {
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
                         placeholder="Пошук за назвою, артикулом, штрих-кодом"
-                        className="w-64 max-w-full rounded-lg border border-graphite-200 py-2 pl-9 pr-3 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
+                        className="w-64 max-w-full rounded-lg border border-graphite-200 py-2 pl-9 pr-9 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
                       />
+                      {/* Subtle, non-blocking progress hint inside the field. */}
+                      {searching ? (
+                        <Loader2
+                          className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-accent-500"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                      <span className="sr-only" role="status" aria-live="polite">
+                        {searching ? "Пошук…" : ""}
+                      </span>
                     </div>
                     <button
                       type="button"
@@ -248,7 +352,7 @@ export default function AdminPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredProducts.map((product) => (
+                      {visibleProducts.map((product) => (
                         <tr
                           key={product.id}
                           className="border-t border-graphite-100 transition-colors hover:bg-graphite-50"
@@ -317,13 +421,31 @@ export default function AdminPage() {
                   </table>
                 </div>
 
-                {filteredProducts.length === 0 ? (
+                {visibleProducts.length === 0 ? (
                   <p className="p-8 text-center text-sm text-graphite-500">
-                    {query
-                      ? `За запитом «${query}» товарів не знайдено.`
-                      : "Каталог порожній. Додайте перший товар."}
+                    {searching
+                      ? "Пошук…"
+                      : debouncedQuery.trim()
+                        ? `За запитом «${debouncedQuery}» товарів не знайдено.`
+                        : "Каталог порожній. Додайте перший товар."}
                   </p>
-                ) : null}
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-t border-graphite-100 p-4">
+                    <span className="text-xs text-graphite-500">
+                      Показано {visibleProducts.length} з {matchCount}
+                    </span>
+                    {hasMore ? (
+                      <button
+                        type="button"
+                        onClick={() => setPageSize((size) => size + PAGE_SIZE)}
+                        disabled={searching}
+                        className="rounded-lg border border-graphite-300 px-4 py-2 text-sm font-bold text-graphite-800 transition-colors hover:border-accent-500 hover:text-accent-600 disabled:opacity-50"
+                      >
+                        Показати ще
+                      </button>
+                    ) : null}
+                  </div>
+                )}
               </div>
             </section>
           ) : null}
