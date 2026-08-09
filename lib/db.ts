@@ -1,10 +1,13 @@
 import { neon } from "@neondatabase/serverless";
 import type { Product } from "@/lib/products";
-import type {
-  Order,
-  OrderInput,
-  OrderItem,
-  OrderStatus,
+import {
+  InsufficientStockError,
+  reservesStock,
+  type Order,
+  type OrderInput,
+  type OrderItem,
+  type OrderStatus,
+  type StockShortage,
 } from "@/lib/orders";
 import {
   LOCAL_PLACEHOLDER,
@@ -143,6 +146,23 @@ export async function ensureProductsTable(): Promise<void> {
   await sql`
     CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)
   `;
+  // Stock can never go below zero. This is the guard that makes overselling
+  // impossible: two checkouts racing for the last item both try to write a
+  // negative value, Postgres rejects the second, and its whole transaction —
+  // order row included — rolls back. NOT VALID skips the scan of existing rows
+  // (an older import may have left negatives behind); every write from here on
+  // is still checked. Postgres has no ADD CONSTRAINT IF NOT EXISTS, hence the
+  // block that swallows the "already there" error on later calls.
+  await sql`
+    DO $$
+    BEGIN
+      ALTER TABLE products
+        ADD CONSTRAINT products_stock_non_negative CHECK (stock >= 0) NOT VALID;
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END
+    $$
+  `;
 }
 
 /** Map a database row onto the site's `Product` shape. */
@@ -240,6 +260,9 @@ export async function updateProductFromAdmin(
   const sql = getSql();
   // The admin owns this field, so an empty box genuinely means "no barcode".
   const barcode = update.barcode.trim() === "" ? null : update.barcode.trim();
+  // `products_stock_non_negative` would reject a negative; a negative on-hand
+  // count means "none left" anyway, which is how the catalog already reads it.
+  const stock = Math.max(0, update.stock);
 
   await sql`
     INSERT INTO products (
@@ -250,7 +273,7 @@ export async function updateProductFromAdmin(
       ${update.sku},
       ${update.name},
       ${update.price},
-      ${update.stock},
+      ${stock},
       ${update.brand},
       ${update.category},
       ${update.imageUrl},
@@ -303,6 +326,16 @@ export async function ensureOrdersTable(): Promise<void> {
   await sql`
     CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC)
   `;
+  // Whether this order currently holds a stock reservation — the flag that
+  // makes status changes idempotent. Only a transition that actually flips it
+  // moves `products.stock`, so restocking twice is impossible no matter how
+  // often "Скасувати" is pressed. Rows that predate stock tracking default to
+  // `false`: their stock was never deducted, so cancelling them must not credit
+  // quantities back that never left.
+  await sql`
+    ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS stock_applied boolean NOT NULL DEFAULT false
+  `;
 }
 
 interface OrderRow {
@@ -344,41 +377,321 @@ function rowToOrder(row: OrderRow): Order {
   };
 }
 
-/** Insert a new order and return it (with the generated id). */
+/* ---------------------------- stock movements ---------------------------- */
+
+/**
+ * Stock bookkeeping
+ * -----------------
+ * `products.stock` is the number of units free to sell, so every order holds
+ * its quantities out of that pool from the moment it is placed until it is
+ * cancelled. Two rules keep the number honest:
+ *
+ *  1. `orders.stock_applied` records whether an order currently holds a
+ *     reservation. A status change only touches stock when it flips that flag,
+ *     which is what makes repeated clicks (or two admins at once) harmless.
+ *  2. The `products_stock_non_negative` CHECK constraint refuses a deduction
+ *     that would oversell. Because the write happens inside a transaction with
+ *     the order row, the rejection rolls the order back too.
+ *
+ * The Neon HTTP driver has no interactive transactions — statements cannot be
+ * chosen based on earlier results — so each step below is written as a single
+ * self-contained statement and the steps are submitted with `sql.transaction()`.
+ */
+
+let stockSchemaReady: Promise<void> | null = null;
+
+/**
+ * Ensure both tables and the non-negative-stock constraint exist.
+ *
+ * Memoized per server process: the statements are idempotent, but each is a
+ * round trip and checkout should not pay for them on every order. A failure
+ * clears the cache so the next request retries instead of inheriting it.
+ */
+export function ensureStockSchema(): Promise<void> {
+  stockSchemaReady ??= (async () => {
+    await ensureProductsTable();
+    await ensureOrdersTable();
+  })().catch((error: unknown) => {
+    stockSchemaReady = null;
+    throw error;
+  });
+  return stockSchemaReady;
+}
+
+/** One product and the number of units to move. */
+interface StockLine {
+  sku: string;
+  quantity: number;
+}
+
+/**
+ * Collapse order items into one line per SKU.
+ *
+ * An order can list the same SKU twice, and `UPDATE … FROM UNNEST(…)` applies
+ * only one row per target — the duplicate would be dropped silently. Items
+ * without a SKU (hand-entered names) simply carry no stock: there is no catalog
+ * row to move.
+ */
+function toStockLines(items: OrderItem[]): StockLine[] {
+  const totals = new Map<string, number>();
+  for (const item of items) {
+    const sku = String(item?.sku ?? "").trim();
+    const quantity = Math.max(0, Math.round(Number(item?.quantity) || 0));
+    if (!sku || quantity === 0) {
+      continue;
+    }
+    totals.set(sku, (totals.get(sku) ?? 0) + quantity);
+  }
+  return [...totals].map(([sku, quantity]) => ({ sku, quantity }));
+}
+
+/** Did Postgres reject this write because it would oversell? */
+function isStockConstraintError(error: unknown): boolean {
+  const detail = error as { code?: string; constraint?: string } | null;
+  if (detail?.code === "23514" || detail?.constraint === "products_stock_non_negative") {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("products_stock_non_negative");
+}
+
+/**
+ * Which of these lines the catalog cannot cover right now.
+ *
+ * Only used to explain a failure — the constraint, not this read, is what
+ * actually prevents overselling.
+ */
+export async function findStockShortages(
+  items: OrderItem[],
+): Promise<StockShortage[]> {
+  const lines = toStockLines(items);
+  if (lines.length === 0) {
+    return [];
+  }
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT
+      t.sku,
+      COALESCE(p.name, '')          AS name,
+      COALESCE(p.stock, 0)::float8  AS available,
+      t.qty::float8                 AS required
+    FROM UNNEST(
+      ${lines.map((line) => line.sku)}::text[],
+      ${lines.map((line) => line.quantity)}::numeric[]
+    ) AS t(sku, qty)
+    LEFT JOIN products p ON p.sku = t.sku
+    WHERE p.sku IS NULL OR COALESCE(p.stock, 0) < t.qty
+  `) as { sku: string; name: string; available: number; required: number }[];
+
+  return rows.map((row) => ({
+    sku: row.sku,
+    name: row.name,
+    available: Math.max(0, toNumber(row.available)),
+    required: toNumber(row.required),
+  }));
+}
+
+/** Insert a new order and reserve its quantities, both or neither. */
 export async function createOrder(input: OrderInput): Promise<Order> {
   const sql = getSql();
-  const run = async () =>
-    (await sql`
-      INSERT INTO orders (
-        status, first_name, last_name, phone, email, contact_channel,
-        city, warehouse, payment_method, comment, items, total
-      ) VALUES (
-        'NEW',
-        ${input.firstName},
-        ${input.lastName},
-        ${input.phone},
-        ${input.email},
-        ${input.contactChannel},
-        ${input.city},
-        ${input.warehouse},
-        ${input.paymentMethod},
-        ${input.comment},
-        ${JSON.stringify(input.items)}::jsonb,
-        ${input.total}
-      )
-      RETURNING *
-    `) as OrderRow[];
+  const lines = toStockLines(input.items);
+
+  // Lazily built: `sql.transaction()` needs unexecuted query objects, and a
+  // retry after a migration must not reuse an already-sent one.
+  const insert = () => sql`
+    INSERT INTO orders (
+      status, first_name, last_name, phone, email, contact_channel,
+      city, warehouse, payment_method, comment, items, total, stock_applied
+    ) VALUES (
+      'NEW',
+      ${input.firstName},
+      ${input.lastName},
+      ${input.phone},
+      ${input.email},
+      ${input.contactChannel},
+      ${input.city},
+      ${input.warehouse},
+      ${input.paymentMethod},
+      ${input.comment},
+      ${JSON.stringify(input.items)}::jsonb,
+      ${input.total},
+      ${lines.length > 0}
+    )
+    RETURNING *
+  `;
+
+  const run = async (): Promise<OrderRow[]> => {
+    if (lines.length === 0) {
+      // Nothing maps to a catalog row, so there is no stock to move.
+      return (await insert()) as OrderRow[];
+    }
+    const [, inserted] = await sql.transaction([
+      stockMove(sql, lines, -1),
+      insert(),
+    ]);
+    return inserted as OrderRow[];
+  };
 
   let rows: OrderRow[];
   try {
     rows = await run();
   } catch (caught) {
+    if (isStockConstraintError(caught)) {
+      // The order was rolled back with the deduction — say what ran out.
+      throw new InsufficientStockError(await findStockShortages(input.items));
+    }
     if (!isMissingSchemaError(caught)) throw caught;
+    await ensureProductsTable();
     await ensureOrdersTable();
     rows = await run();
   }
 
   return rowToOrder(rows[0]);
+}
+
+/**
+ * One statement that adds `sign × quantity` to each product's stock.
+ * `sign` is -1 to reserve stock for an order and +1 to release it.
+ */
+function stockMove(
+  sql: ReturnType<typeof getSql>,
+  lines: StockLine[],
+  sign: -1 | 1,
+) {
+  return sql`
+    UPDATE products p
+    SET stock      = COALESCE(p.stock, 0) + t.delta,
+        updated_at = now()
+    FROM UNNEST(
+      ${lines.map((line) => line.sku)}::text[],
+      ${lines.map((line) => line.quantity * sign)}::numeric[]
+    ) AS t(sku, delta)
+    WHERE p.sku = t.sku
+  `;
+}
+
+/** What a status change did to the warehouse. */
+export type StockEffect = "reserved" | "released" | "unchanged";
+
+export interface OrderStatusUpdate {
+  order: Order;
+  stock: StockEffect;
+}
+
+/** Thrown when the requested order id is not in the table. */
+export class OrderNotFoundError extends Error {
+  constructor(id: number) {
+    super(`Order #${id} not found`);
+    this.name = "OrderNotFoundError";
+  }
+}
+
+/**
+ * Move an order to `status`, adjusting stock if that transition changes whether
+ * the order holds a reservation.
+ *
+ * Cancelling returns the quantities to the catalog; re-opening a cancelled
+ * order takes them out again, and fails if they are no longer available. Every
+ * other transition leaves stock alone.
+ */
+export async function setOrderStatus(
+  id: number,
+  status: OrderStatus,
+): Promise<OrderStatusUpdate> {
+  const sql = getSql();
+
+  const readCurrent = async () =>
+    (await sql`
+      SELECT items, COALESCE(stock_applied, false) AS stock_applied
+      FROM orders
+      WHERE id = ${id}
+    `) as { items: unknown; stock_applied: boolean }[];
+
+  let current: { items: unknown; stock_applied: boolean }[];
+  try {
+    current = await readCurrent();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureOrdersTable();
+    current = await readCurrent();
+  }
+
+  const row = current[0];
+  if (!row) {
+    throw new OrderNotFoundError(id);
+  }
+
+  const shouldHold = reservesStock(status);
+  const holdsNow = row.stock_applied === true;
+  const items = Array.isArray(row.items) ? (row.items as OrderItem[]) : [];
+  const lines = toStockLines(items);
+  const effect: StockEffect =
+    shouldHold === holdsNow || lines.length === 0
+      ? "unchanged"
+      : shouldHold
+        ? "reserved"
+        : "released";
+
+  const setStatus = () => sql`
+    UPDATE orders SET status = ${status} WHERE id = ${id} RETURNING *
+  `;
+
+  /**
+   * Claim the reservation flag and move stock in the same statement.
+   *
+   * The `WHERE … stock_applied = ${holdsNow}` is an optimistic lock: whoever
+   * flips the flag first gets rows out of `claimed`, and the product update is
+   * gated on that, so a second concurrent (or repeated) cancellation restocks
+   * nothing. Being one statement, it is atomic on its own.
+   */
+  const claimAndMove = () => sql`
+    WITH claimed AS (
+      UPDATE orders
+      SET stock_applied = ${shouldHold}
+      WHERE id = ${id} AND COALESCE(stock_applied, false) = ${holdsNow}
+      RETURNING id
+    ),
+    moved AS (
+      UPDATE products p
+      SET stock      = COALESCE(p.stock, 0) + t.delta,
+          updated_at = now()
+      FROM UNNEST(
+        ${lines.map((line) => line.sku)}::text[],
+        ${lines.map((line) => line.quantity * (shouldHold ? -1 : 1))}::numeric[]
+      ) AS t(sku, delta)
+      WHERE p.sku = t.sku AND EXISTS (SELECT 1 FROM claimed)
+      RETURNING p.sku
+    )
+    SELECT (SELECT count(*) FROM claimed)::int AS claimed,
+           (SELECT count(*) FROM moved)::int   AS moved
+  `;
+
+  const run = async (): Promise<{ rows: OrderRow[]; applied: StockEffect }> => {
+    if (effect === "unchanged") {
+      return { rows: (await setStatus()) as OrderRow[], applied: "unchanged" };
+    }
+    const [claim, updated] = await sql.transaction([claimAndMove(), setStatus()]);
+    // Losing the claim means another request already made this move — the
+    // status still applies, but reporting a stock change would be a lie.
+    const claimed = Number(claim[0]?.claimed ?? 0) > 0;
+    return { rows: updated as OrderRow[], applied: claimed ? effect : "unchanged" };
+  };
+
+  let result: { rows: OrderRow[]; applied: StockEffect };
+  try {
+    result = await run();
+  } catch (caught) {
+    if (isStockConstraintError(caught)) {
+      // Nothing was written: the status change rolled back with the deduction.
+      throw new InsufficientStockError(await findStockShortages(items));
+    }
+    throw caught;
+  }
+
+  if (!result.rows[0]) {
+    throw new OrderNotFoundError(id);
+  }
+  return { order: rowToOrder(result.rows[0]), stock: result.applied };
 }
 
 /** Most recent orders first. */
@@ -539,7 +852,9 @@ export async function upsertProducts(items: ImportItem[]): Promise<number> {
     const skus = chunk.map((item) => item.sku);
     const names = chunk.map((item) => item.name);
     const prices = chunk.map((item) => item.price);
-    const stocks = chunk.map((item) => item.stock);
+    // Clamped for `products_stock_non_negative`: УкрСклад can report a negative
+    // on-hand balance, and one such row must not abort the whole chunk.
+    const stocks = chunk.map((item) => Math.max(0, item.stock));
     // Empty string -> NULL so "no barcode" is stored as NULL, not "".
     const barcodes = chunk.map((item) => {
       const value = (item.barcode ?? "").trim();

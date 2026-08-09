@@ -1,10 +1,12 @@
 "use server";
 
-import { createOrder, ensureOrdersTable, hasDatabase } from "@/lib/db";
+import { createOrder, ensureStockSchema, hasDatabase } from "@/lib/db";
 import { notifyNewOrder } from "@/lib/notifications";
 import {
   CONTACT_CHANNELS,
+  InsufficientStockError,
   PAYMENT_METHODS,
+  describeShortages,
   normalizePhone,
   type ContactChannel,
   type OrderItem,
@@ -123,7 +125,8 @@ export async function submitOrder(
   }
 
   try {
-    await ensureOrdersTable();
+    // Also installs the stock guard the deduction below relies on.
+    await ensureStockSchema();
     const order = await createOrder({
       firstName,
       lastName,
@@ -150,6 +153,18 @@ export async function submitOrder(
 
     return { ok: true, orderId: order.id };
   } catch (caught) {
+    if (caught instanceof InsufficientStockError) {
+      // The order was rolled back together with the stock deduction, so the
+      // customer can fix the cart and try again without a duplicate order.
+      console.warn(
+        `[checkout] Rejected — insufficient stock: ${caught.shortages
+          .map((item) => `${item.sku} (${item.available}/${item.required})`)
+          .join(", ")}`,
+      );
+      return {
+        error: `${describeShortages(caught.shortages)} Змініть кількість у кошику або зателефонуйте нам.`,
+      };
+    }
     const message = caught instanceof Error ? caught.message : String(caught);
     console.error(`[checkout] Failed to save order: ${message}`);
     return {

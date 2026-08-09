@@ -41,11 +41,62 @@ export const ORDER_STATUSES = [
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number]["value"];
 
+/**
+ * Does an order in this status hold a stock reservation?
+ *
+ * Stock is deducted the moment an order is placed and stays deducted for its
+ * whole life — the goods are spoken for whether the order is new, confirmed,
+ * shipped or delivered. Only a cancellation puts them back on the shelf, so
+ * `CANCELLED` is the single status that releases stock.
+ */
+export function reservesStock(status: OrderStatus): boolean {
+  return status !== "CANCELLED";
+}
+
 export interface OrderItem {
   sku: string;
   name: string;
   price: number;
   quantity: number;
+}
+
+/** A product that cannot cover the quantity an order asks for. */
+export interface StockShortage {
+  sku: string;
+  /** Empty when the SKU is not in the catalog at all. */
+  name: string;
+  /** Units on hand right now. */
+  available: number;
+  required: number;
+}
+
+/**
+ * Thrown when a stock deduction would drive `products.stock` below zero. The
+ * database refuses the write, so the surrounding transaction is already rolled
+ * back by the time this reaches the caller — nothing has been saved.
+ */
+export class InsufficientStockError extends Error {
+  readonly shortages: StockShortage[];
+
+  constructor(shortages: StockShortage[]) {
+    super(`Insufficient stock for ${shortages.length || "unknown"} product(s)`);
+    this.name = "InsufficientStockError";
+    this.shortages = shortages;
+  }
+}
+
+/** Customer-facing explanation of which products ran out, and by how much. */
+export function describeShortages(shortages: StockShortage[]): string {
+  if (shortages.length === 0) {
+    return "Товару не вистачає на складі. Оновіть кошик або зателефонуйте нам.";
+  }
+  const lines = shortages.map((item) => {
+    const title = item.name || `артикул ${item.sku}`;
+    return item.available > 0
+      ? `«${title}» — доступно ${item.available} шт., потрібно ${item.required}`
+      : `«${title}» — немає в наявності`;
+  });
+  return `Недостатньо товару на складі: ${lines.join("; ")}.`;
 }
 
 export interface OrderInput {
