@@ -20,24 +20,48 @@ export interface LoadProductsResult {
   source: ProductSource;
   error?: string;
   loadedAt: string;
+  /** Diagnostics — why the catalog is empty is otherwise invisible in prod. */
+  diagnostics?: {
+    /** Was a Postgres connection string found in the environment? */
+    databaseConfigured: boolean;
+    /** Name of the env var that supplied it (never the value). */
+    connectionSource?: string;
+    /** Error text if the database was configured but reading it failed. */
+    databaseError?: string;
+  };
 }
 
 export async function loadProducts(): Promise<LoadProductsResult> {
   const loadedAt = new Date().toISOString();
+  const databaseConfigured = hasDatabase();
+  const connectionSource = getConnectionSource();
+  let databaseError: string | undefined;
 
-  if (hasDatabase()) {
+  if (databaseConfigured) {
     try {
       const products = await loadProductsFromDb();
       console.info(
-        `[catalog] Loaded ${products.length} products from Postgres (via ${getConnectionSource()})`,
+        `[catalog] Loaded ${products.length} products from Postgres (via ${connectionSource})`,
       );
-      return { products, source: "database", loadedAt };
+      return {
+        products,
+        source: "database",
+        loadedAt,
+        diagnostics: { databaseConfigured, connectionSource },
+      };
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
-      console.error(`[catalog] Database read failed: ${message}`);
-      // Fall through to the file source rather than breaking the whole site.
+      databaseError = caught instanceof Error ? caught.message : String(caught);
+      console.error(`[catalog] Database read failed: ${databaseError}`);
+      // Fall through to the file source rather than breaking the whole site —
+      // but keep the reason so it reaches the API response.
     }
+  } else {
+    console.warn("[catalog] No Postgres connection string found in env");
   }
 
-  return loadProductsFromFile();
+  const fileResult = await loadProductsFromFile();
+  return {
+    ...fileResult,
+    diagnostics: { databaseConfigured, connectionSource, databaseError },
+  };
 }

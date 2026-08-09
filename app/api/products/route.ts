@@ -13,6 +13,8 @@ export async function GET() {
       count: result.products.length,
       loadedAt: result.loadedAt,
       error: result.error ?? null,
+      // Names and error text only — never the connection string itself.
+      diagnostics: result.diagnostics ?? null,
     },
     {
       headers: {

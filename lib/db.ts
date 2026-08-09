@@ -57,16 +57,21 @@ function getSql() {
 }
 
 /** Row shape of the `products` table. `numeric` comes back as a string. */
+/**
+ * Row of the `products` table. Every column except sku/name is optional here:
+ * the table gains columns over time, and reading must not break when the
+ * database has not been migrated yet (`SELECT *` simply omits them).
+ */
 interface ProductRow {
   sku: string;
   name: string;
-  price: string | number | null;
-  stock: string | number | null;
-  attributes: Record<string, unknown> | null;
-  category: string | null;
-  brand: string | null;
-  image_url: string | null;
-  barcode: string | null;
+  price?: string | number | null;
+  stock?: string | number | null;
+  attributes?: Record<string, unknown> | null;
+  category?: string | null;
+  brand?: string | null;
+  image_url?: string | null;
+  barcode?: string | null;
 }
 
 /** Keep only non-empty string pairs — the UI and filters assume clean data. */
@@ -87,7 +92,7 @@ export function sanitizeAttributes(
   return clean;
 }
 
-function toNumber(value: string | number | null): number {
+function toNumber(value: string | number | null | undefined): number {
   const num = typeof value === "number" ? value : Number(value ?? 0);
   return Number.isFinite(num) ? num : 0;
 }
@@ -162,14 +167,40 @@ function rowToProduct(row: ProductRow): Product {
   };
 }
 
-/** Read the whole catalog from Postgres. */
+/** Does this error mean the table or one of its columns is missing? */
+function isMissingSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /does not exist|undefined column|undefined table|relation .* does not exist/i.test(
+    message,
+  );
+}
+
+/**
+ * Read the whole catalog from Postgres.
+ *
+ * Uses `SELECT *` on purpose: the table gains columns over releases, and a
+ * fixed column list would throw on a database that has not been migrated yet,
+ * silently emptying the catalog. If the schema really is missing, the
+ * migration runs once and the read is retried, so the site self-heals instead
+ * of needing a manual SQL step.
+ */
 export async function loadProductsFromDb(): Promise<Product[]> {
   const sql = getSql();
-  const rows = (await sql`
-    SELECT sku, name, price, stock, attributes, category, brand, image_url, barcode
-    FROM products
-    ORDER BY name
-  `) as ProductRow[];
+
+  const read = async () =>
+    (await sql`SELECT * FROM products ORDER BY name`) as ProductRow[];
+
+  let rows: ProductRow[];
+  try {
+    rows = await read();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) {
+      throw caught;
+    }
+    console.warn("[db] products schema missing — running migration and retrying");
+    await ensureProductsTable();
+    rows = await read();
+  }
 
   return rows
     .filter((row) => row.sku && (row.name ?? "").trim() !== "")
