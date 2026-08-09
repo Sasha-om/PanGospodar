@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   Inbox,
@@ -462,11 +463,17 @@ export default function AdminPage() {
                   <Inbox className="h-8 w-8" aria-hidden="true" />
                 </span>
                 <h3 className="mt-4 text-base font-bold text-graphite-950">
-                  Замовлень поки немає
+                  Замовлення відкриваються окремою сторінкою
                 </h3>
                 <p className="mt-1 max-w-xs text-sm text-graphite-500">
-                  Нові замовлення від покупців з&apos;являться тут.
+                  Список читається з бази даних на сервері.
                 </p>
+                <Link
+                  href="/admin/orders"
+                  className="mt-4 rounded-lg bg-accent-500 px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent-600"
+                >
+                  Переглянути замовлення
+                </Link>
               </div>
             </section>
           ) : null}

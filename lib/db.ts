@@ -1,5 +1,11 @@
 import { neon } from "@neondatabase/serverless";
 import type { Product } from "@/lib/products";
+import type {
+  Order,
+  OrderInput,
+  OrderItem,
+  OrderStatus,
+} from "@/lib/orders";
 import {
   LOCAL_PLACEHOLDER,
   detectBrand,
@@ -269,6 +275,129 @@ export async function updateProductFromAdmin(
 export async function deleteProductBySku(sku: string): Promise<void> {
   const sql = getSql();
   await sql`DELETE FROM products WHERE sku = ${sku}`;
+}
+
+/* ------------------------------- orders --------------------------------- */
+
+/** Create the `orders` table if it does not exist. Idempotent. */
+export async function ensureOrdersTable(): Promise<void> {
+  const sql = getSql();
+  await sql`
+    CREATE TABLE IF NOT EXISTS orders (
+      id              serial PRIMARY KEY,
+      status          text NOT NULL DEFAULT 'NEW',
+      first_name      text NOT NULL,
+      last_name       text NOT NULL,
+      phone           text NOT NULL,
+      email           text,
+      contact_channel text NOT NULL,
+      city            text NOT NULL,
+      warehouse       text NOT NULL,
+      payment_method  text NOT NULL,
+      comment         text,
+      items           jsonb NOT NULL DEFAULT '[]'::jsonb,
+      total           numeric NOT NULL DEFAULT 0,
+      created_at      timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC)
+  `;
+}
+
+interface OrderRow {
+  id: number;
+  status: string;
+  first_name: string;
+  last_name: string;
+  phone: string;
+  email: string | null;
+  contact_channel: string;
+  city: string;
+  warehouse: string;
+  payment_method: string;
+  comment: string | null;
+  items: unknown;
+  total: string | number | null;
+  created_at: string | Date;
+}
+
+function rowToOrder(row: OrderRow): Order {
+  return {
+    id: row.id,
+    status: (row.status as OrderStatus) ?? "NEW",
+    firstName: row.first_name ?? "",
+    lastName: row.last_name ?? "",
+    phone: row.phone ?? "",
+    email: row.email ?? "",
+    contactChannel: row.contact_channel as Order["contactChannel"],
+    city: row.city ?? "",
+    warehouse: row.warehouse ?? "",
+    paymentMethod: row.payment_method as Order["paymentMethod"],
+    comment: row.comment ?? "",
+    items: Array.isArray(row.items) ? (row.items as OrderItem[]) : [],
+    total: toNumber(row.total),
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+  };
+}
+
+/** Insert a new order and return it (with the generated id). */
+export async function createOrder(input: OrderInput): Promise<Order> {
+  const sql = getSql();
+  const run = async () =>
+    (await sql`
+      INSERT INTO orders (
+        status, first_name, last_name, phone, email, contact_channel,
+        city, warehouse, payment_method, comment, items, total
+      ) VALUES (
+        'NEW',
+        ${input.firstName},
+        ${input.lastName},
+        ${input.phone},
+        ${input.email},
+        ${input.contactChannel},
+        ${input.city},
+        ${input.warehouse},
+        ${input.paymentMethod},
+        ${input.comment},
+        ${JSON.stringify(input.items)}::jsonb,
+        ${input.total}
+      )
+      RETURNING *
+    `) as OrderRow[];
+
+  let rows: OrderRow[];
+  try {
+    rows = await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureOrdersTable();
+    rows = await run();
+  }
+
+  return rowToOrder(rows[0]);
+}
+
+/** Most recent orders first. */
+export async function listOrders(limit = 50): Promise<Order[]> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
+  const run = async () =>
+    (await sql`
+      SELECT * FROM orders ORDER BY created_at DESC LIMIT ${safeLimit}
+    `) as OrderRow[];
+
+  try {
+    return (await run()).map(rowToOrder);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    // No orders table yet simply means no orders.
+    await ensureOrdersTable();
+    return [];
+  }
 }
 
 export interface AdminSearchResult {
