@@ -10,6 +10,7 @@ import {
   categories,
   getProductAttributes,
   getSubcategoryBySlug,
+  productMatchesQuery,
 } from "@/lib/products";
 
 const SORT_OPTIONS = [
@@ -139,11 +140,8 @@ export default function CatalogBrowser({
       if (subRegex && !subRegex.test(product.name)) {
         return false;
       }
-      if (
-        query &&
-        !product.name.toLowerCase().includes(query) &&
-        !product.shortDescription.toLowerCase().includes(query)
-      ) {
+      // Matches name, description, article and barcode.
+      if (query && !productMatchesQuery(product, query)) {
         return false;
       }
       return true;

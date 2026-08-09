@@ -66,6 +66,7 @@ interface ProductRow {
   category: string | null;
   brand: string | null;
   image_url: string | null;
+  barcode: string | null;
 }
 
 /** Keep only non-empty string pairs — the UI and filters assume clean data. */
@@ -123,6 +124,14 @@ export async function ensureProductsTable(): Promise<void> {
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS image_url text
   `;
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS barcode text
+  `;
+  // Barcode lookups are exact-match, so a plain index is enough.
+  await sql`
+    CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)
+  `;
 }
 
 /** Map a database row onto the site's `Product` shape. */
@@ -132,10 +141,13 @@ function rowToProduct(row: ProductRow): Product {
   const storedCategory = (row.category ?? "").trim();
   const storedBrand = (row.brand ?? "").trim();
   const storedImage = (row.image_url ?? "").trim();
+  // Nullable in the database and optional everywhere downstream.
+  const storedBarcode = (row.barcode ?? "").trim();
 
   return {
     id: row.sku,
     sku: row.sku,
+    barcode: storedBarcode || undefined,
     name,
     // An admin-set value wins; otherwise fall back to inference from the name.
     brand: storedBrand || detectBrand("", name),
@@ -154,7 +166,7 @@ function rowToProduct(row: ProductRow): Product {
 export async function loadProductsFromDb(): Promise<Product[]> {
   const sql = getSql();
   const rows = (await sql`
-    SELECT sku, name, price, stock, attributes, category, brand, image_url
+    SELECT sku, name, price, stock, attributes, category, brand, image_url, barcode
     FROM products
     ORDER BY name
   `) as ProductRow[];
@@ -172,6 +184,8 @@ export interface AdminProductUpdate {
   price: number;
   stock: number;
   imageUrl: string;
+  /** Empty string clears the barcode (stored as NULL). */
+  barcode: string;
   attributes: Record<string, string>;
 }
 
@@ -187,9 +201,13 @@ export async function updateProductFromAdmin(
   update: AdminProductUpdate,
 ): Promise<void> {
   const sql = getSql();
+  // The admin owns this field, so an empty box genuinely means "no barcode".
+  const barcode = update.barcode.trim() === "" ? null : update.barcode.trim();
+
   await sql`
     INSERT INTO products (
-      sku, name, price, stock, brand, category, image_url, attributes, updated_at
+      sku, name, price, stock, brand, category, image_url, barcode,
+      attributes, updated_at
     )
     VALUES (
       ${update.sku},
@@ -199,6 +217,7 @@ export async function updateProductFromAdmin(
       ${update.brand},
       ${update.category},
       ${update.imageUrl},
+      ${barcode},
       ${JSON.stringify(update.attributes)}::jsonb,
       now()
     )
@@ -209,6 +228,7 @@ export async function updateProductFromAdmin(
       brand      = EXCLUDED.brand,
       category   = EXCLUDED.category,
       image_url  = EXCLUDED.image_url,
+      barcode    = EXCLUDED.barcode,
       attributes = EXCLUDED.attributes,
       updated_at = now()
   `;
@@ -225,6 +245,8 @@ export interface ImportItem {
   name: string;
   price: number;
   stock: number;
+  /** Optional — many products have no barcode. */
+  barcode?: string | null;
 }
 
 /** Postgres rejects two updates of the same key in one statement — dedupe first. */
@@ -261,20 +283,29 @@ export async function upsertProducts(items: ImportItem[]): Promise<number> {
     const names = chunk.map((item) => item.name);
     const prices = chunk.map((item) => item.price);
     const stocks = chunk.map((item) => item.stock);
+    // Empty string -> NULL so "no barcode" is stored as NULL, not "".
+    const barcodes = chunk.map((item) => {
+      const value = (item.barcode ?? "").trim();
+      return value === "" ? null : value;
+    });
 
     await sql`
-      INSERT INTO products (sku, name, price, stock, updated_at)
-      SELECT s, n, p, st, now()
+      INSERT INTO products (sku, name, price, stock, barcode, updated_at)
+      SELECT s, n, p, st, bc, now()
       FROM UNNEST(
         ${skus}::text[],
         ${names}::text[],
         ${prices}::numeric[],
-        ${stocks}::numeric[]
-      ) AS t(s, n, p, st)
+        ${stocks}::numeric[],
+        ${barcodes}::text[]
+      ) AS t(s, n, p, st, bc)
       ON CONFLICT (sku) DO UPDATE SET
         name       = EXCLUDED.name,
         price      = EXCLUDED.price,
         stock      = EXCLUDED.stock,
+        -- Keep a previously stored barcode when this import omits one,
+        -- so a feed without barcodes does not wipe existing values.
+        barcode    = COALESCE(EXCLUDED.barcode, products.barcode),
         updated_at = now()
     `;
 

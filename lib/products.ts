@@ -23,6 +23,8 @@ export interface Product {
   id: string;
   /** Article / code from the accounting system (УкрСклад). Defaults to `id`. */
   sku?: string;
+  /** Manufacturer barcode (EAN). Absent for many products. */
+  barcode?: string;
   name: string;
   brand: string;
   price: number;
@@ -48,6 +50,39 @@ export interface Product {
   attributes?: Record<string, string>;
   imageUrl: string;
   categorySlug: string;
+}
+
+/**
+ * Does this product match a free-text query?
+ *
+ * Matches name, description, article and barcode. Barcodes are compared with
+ * separators stripped, so "482 000 123" finds "482000123". Null/absent values
+ * are simply skipped.
+ */
+export function productMatchesQuery(product: Product, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) {
+    return true;
+  }
+  if (
+    product.name.toLowerCase().includes(needle) ||
+    product.shortDescription.toLowerCase().includes(needle) ||
+    (product.sku ?? "").toLowerCase().includes(needle)
+  ) {
+    return true;
+  }
+
+  const barcode = (product.barcode ?? "").toLowerCase();
+  if (!barcode) {
+    return false;
+  }
+  if (barcode.includes(needle)) {
+    return true;
+  }
+  // Digits-only comparison for barcodes typed/scanned with spaces or dashes.
+  const digits = (value: string) => value.replace(/[^0-9]/g, "");
+  const needleDigits = digits(needle);
+  return needleDigits.length > 0 && digits(barcode).includes(needleDigits);
 }
 
 /**

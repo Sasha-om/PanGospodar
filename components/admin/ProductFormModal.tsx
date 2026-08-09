@@ -18,6 +18,7 @@ export interface ProductFormValues {
   categorySlug: string;
   price: string;
   stock: string;
+  barcode: string;
   imageUrl: string;
   shortDescription: string;
   attributes: AttributeRow[];
@@ -35,6 +36,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormValues = {
   categorySlug: categories[0]?.slug ?? "",
   price: "",
   stock: "0",
+  barcode: "",
   imageUrl: "",
   shortDescription: "",
   attributes: [],
@@ -147,6 +149,8 @@ export default function ProductFormModal({
     const quantity = Math.max(0, Math.round(Number(values.stock) || 0));
     const imageUrl = values.imageUrl.trim() || placeholderImage(name);
 
+    const barcode = values.barcode.trim();
+
     onSubmit({
       name,
       brand,
@@ -154,6 +158,7 @@ export default function ProductFormModal({
       price,
       quantity,
       inStock: quantity > 0,
+      barcode: barcode || undefined,
       imageUrl,
       shortDescription: values.shortDescription.trim(),
       techSpecs: { power: "", weight: "", warranty: "" },
@@ -269,6 +274,25 @@ export default function ProductFormModal({
                 onChange={(event) => setField("stock", event.target.value)}
                 className={fieldClass}
               />
+            </div>
+
+            <div className="sm:col-span-2">
+              <label htmlFor="pf-barcode" className={labelClass}>
+                Штрих-код
+              </label>
+              <input
+                id="pf-barcode"
+                type="text"
+                inputMode="numeric"
+                placeholder="напр. 4820001234567"
+                value={values.barcode}
+                onChange={(event) => setField("barcode", event.target.value)}
+                className={fieldClass}
+              />
+              <p className="mt-1 text-xs text-stone-500">
+                Необов&apos;язково. За ним можна шукати товар у каталозі та
+                адмінці.
+              </p>
             </div>
 
             <div className="sm:col-span-2">
@@ -430,6 +454,7 @@ export function toFormValues(product: Product): ProductFormValues {
     categorySlug: product.categorySlug,
     price: String(product.price),
     stock: String(product.quantity ?? 0),
+    barcode: product.barcode ?? "",
     imageUrl: product.imageUrl,
     shortDescription: product.shortDescription,
     // Merge legacy techSpecs into the editable list so nothing is lost.

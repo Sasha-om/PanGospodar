@@ -20,7 +20,11 @@ import ProductFormModal, {
   toFormValues,
 } from "@/components/admin/ProductFormModal";
 import { useProducts } from "@/context/ProductsContext";
-import { categories, type Product } from "@/lib/products";
+import {
+  categories,
+  productMatchesQuery,
+  type Product,
+} from "@/lib/products";
 
 const SECTIONS = [
   { id: "products", label: "Товари", icon: Package },
@@ -71,14 +75,17 @@ export default function AdminPage() {
   }
 
   const filteredProducts = useMemo(() => {
-    const search = query.trim().toLowerCase();
+    const search = query.trim();
     if (!search) {
       return products;
     }
+    const lowered = search.toLowerCase();
     return products.filter(
       (product) =>
-        product.name.toLowerCase().includes(search) ||
-        product.brand.toLowerCase().includes(search),
+        // Name, description, article and barcode…
+        productMatchesQuery(product, search) ||
+        // …plus brand, which only matters in the admin table.
+        product.brand.toLowerCase().includes(lowered),
     );
   }, [products, query]);
 
@@ -200,7 +207,7 @@ export default function AdminPage() {
                         type="search"
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
-                        placeholder="Пошук за назвою або брендом"
+                        placeholder="Пошук за назвою, артикулом, штрих-кодом"
                         className="w-64 max-w-full rounded-lg border border-graphite-200 py-2 pl-9 pr-3 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
                       />
                     </div>
@@ -252,6 +259,14 @@ export default function AdminPage() {
                             </div>
                             <div className="text-xs text-graphite-500">
                               Артикул: {product.sku ?? product.id}
+                              {product.barcode ? (
+                                <>
+                                  <span className="mx-1.5 text-graphite-300">
+                                    |
+                                  </span>
+                                  Штрих-код: {product.barcode}
+                                </>
+                              ) : null}
                             </div>
                           </td>
                           <td className="px-5 py-3 text-graphite-600">

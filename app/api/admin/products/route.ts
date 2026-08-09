@@ -79,6 +79,7 @@ export async function POST(request: Request) {
       price: Math.max(0, toNumber(payload.price)),
       stock: Math.max(0, Math.round(toNumber(payload.stock))),
       imageUrl: String(payload.imageUrl ?? "").trim(),
+      barcode: String(payload.barcode ?? "").trim(),
       attributes: sanitizeAttributes(payload.attributes),
     });
     return json({ success: true, sku }, 200);

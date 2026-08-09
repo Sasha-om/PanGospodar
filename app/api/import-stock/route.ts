@@ -74,11 +74,20 @@ function parseItems(raw: unknown): { items: ImportItem[]; skipped: number } {
       continue;
     }
 
+    // Optional: accept `barcode` (or the common alias `ean`). Missing/blank
+    // stays null so it is stored as NULL rather than an empty string.
+    const rawBarcode = record.barcode ?? record.ean;
+    const barcode =
+      rawBarcode === undefined || rawBarcode === null
+        ? null
+        : String(rawBarcode).trim() || null;
+
     items.push({
       sku,
       name,
       price: Math.max(0, toNumber(record.price)),
       stock: Math.max(0, Math.round(toNumber(record.stock))),
+      barcode,
     });
   }
 

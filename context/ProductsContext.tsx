@@ -111,6 +111,7 @@ export function ProductsProvider({
           price: product.price,
           stock: product.quantity ?? 0,
           imageUrl: product.imageUrl,
+          barcode: product.barcode ?? "",
           attributes: product.attributes ?? {},
         }),
       });

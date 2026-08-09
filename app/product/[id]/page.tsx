@@ -79,6 +79,12 @@ export default async function ProductPage({
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-stone-500">
                 Артикул: {product.sku ?? product.id}
+                {product.barcode ? (
+                  <>
+                    <span className="mx-2 text-stone-300">|</span>
+                    Штрих-код: {product.barcode}
+                  </>
+                ) : null}
               </p>
               <h1 className="mt-1 text-3xl font-extrabold leading-tight text-stone-800 sm:text-4xl">
                 {product.name}

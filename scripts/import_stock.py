@@ -32,6 +32,9 @@ COLUMN_MAP = {
     "name": ["name", "назва", "повна назва товару", "найменування"],
     "price": ["price", "ціна", "розд. ціна", "роздрібна ціна"],
     "stock": ["stock", "кількість", "к-ть", "залишок"],
+    "barcode": [
+        "barcode", "ean", "штрих-код виробника", "штрих-код", "штрихкод",
+    ],
 }
 
 
@@ -77,11 +80,14 @@ def build_items(rows: list) -> list:
         name = pick(row, COLUMN_MAP["name"])
         if not sku or not name:
             continue
+        # Optional — sent as null when the export has no barcode.
+        barcode = pick(row, COLUMN_MAP["barcode"]).strip()
         items.append({
             "sku": sku,
             "name": name,
             "price": to_number(pick(row, COLUMN_MAP["price"])),
             "stock": to_number(pick(row, COLUMN_MAP["stock"])),
+            "barcode": barcode or None,
         })
     return items
 

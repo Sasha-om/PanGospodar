@@ -137,6 +137,7 @@ function normalizeItem(item: RawItem, index: number): Product | null {
     price,
     quantity,
     inStock: quantity > 0,
+    barcode: toText(pick(lookup, FIELD_ALIASES.barcode)) || undefined,
     shortDescription: toText(pick(lookup, FIELD_ALIASES.description)),
     techSpecs: {
       power: toText(pick(lookup, FIELD_ALIASES.power)),
