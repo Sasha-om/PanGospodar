@@ -302,7 +302,7 @@ export default function AdminPage() {
                         type="search"
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
-                        placeholder="Пошук за назвою, артикулом, штрих-кодом"
+                        placeholder="Пошук за назвою, кодом або артикулом"
                         className="w-64 max-w-full rounded-lg border border-graphite-200 py-2 pl-9 pr-9 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
                       />
                       {/* Subtle, non-blocking progress hint inside the field. */}
@@ -363,13 +363,13 @@ export default function AdminPage() {
                               {product.name}
                             </div>
                             <div className="text-xs text-graphite-500">
-                              Артикул: {product.sku ?? product.id}
+                              Код: {product.sku ?? product.id}
                               {product.barcode ? (
                                 <>
                                   <span className="mx-1.5 text-graphite-300">
                                     |
                                   </span>
-                                  Штрих-код: {product.barcode}
+                                  Артикул: {product.barcode}
                                 </>
                               ) : null}
                             </div>
@@ -490,7 +490,7 @@ export default function AdminPage() {
                 {[
                   { id: "store-name", label: "Назва магазину", value: "ПанГосподар" },
                   { id: "store-phone", label: "Телефон", value: "+38 (067) 341-37-51" },
-                  { id: "store-email", label: "Email", value: "pangospod@gmail.com" },
+                  { id: "store-email", label: "Email", value: "O_delfin@ukr.net" },
                   { id: "store-hours", label: "Графік роботи", value: "Пн-Пт 08:30 – 18:00" },
                 ].map((field) => (
                   <div key={field.id}>

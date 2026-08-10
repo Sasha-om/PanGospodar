@@ -78,11 +78,11 @@ export default async function ProductPage({
           <div className="flex flex-col gap-6">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-stone-500">
-                Артикул: {product.sku ?? product.id}
+                Код: {product.sku ?? product.id}
                 {product.barcode ? (
                   <>
                     <span className="mx-2 text-stone-300">|</span>
-                    Штрих-код: {product.barcode}
+                    Артикул: {product.barcode}
                   </>
                 ) : null}
               </p>

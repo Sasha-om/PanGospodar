@@ -105,7 +105,7 @@ export function buildOrderEmailHtml(order: Order): string {
         <tr>
           <td style="padding:8px;border-bottom:1px solid #e7e5e4">
             ${escapeHtml(item.name)}
-            <div style="color:#78716c;font-size:12px">Артикул: ${escapeHtml(item.sku)}</div>
+            <div style="color:#78716c;font-size:12px">Код: ${escapeHtml(item.sku)}</div>
           </td>
           <td style="padding:8px;border-bottom:1px solid #e7e5e4;text-align:center">${item.quantity}</td>
           <td style="padding:8px;border-bottom:1px solid #e7e5e4;text-align:right;white-space:nowrap">

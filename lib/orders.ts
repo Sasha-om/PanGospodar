@@ -91,7 +91,7 @@ export function describeShortages(shortages: StockShortage[]): string {
     return "Товару не вистачає на складі. Оновіть кошик або зателефонуйте нам.";
   }
   const lines = shortages.map((item) => {
-    const title = item.name || `артикул ${item.sku}`;
+    const title = item.name || `код ${item.sku}`;
     return item.available > 0
       ? `«${title}» — доступно ${item.available} шт., потрібно ${item.required}`
       : `«${title}» — немає в наявності`;

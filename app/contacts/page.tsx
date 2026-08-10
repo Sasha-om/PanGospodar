@@ -12,8 +12,8 @@ const contactItems = [
   },
   {
     label: "Email",
-    value: "pangospod@gmail.com",
-    href: "mailto:pangospod@gmail.com",
+    value: "O_delfin@ukr.net",
+    href: "mailto:O_delfin@ukr.net",
   },
   {
     label: "Адреса",

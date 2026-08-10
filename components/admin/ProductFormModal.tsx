@@ -278,13 +278,12 @@ export default function ProductFormModal({
 
             <div className="sm:col-span-2">
               <label htmlFor="pf-barcode" className={labelClass}>
-                Штрих-код
+                Артикул
               </label>
               <input
                 id="pf-barcode"
                 type="text"
-                inputMode="numeric"
-                placeholder="напр. 4820001234567"
+                placeholder="напр. F016800340"
                 value={values.barcode}
                 onChange={(event) => setField("barcode", event.target.value)}
                 className={fieldClass}

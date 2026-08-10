@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Clock, Mail, MapPin, Phone, Store } from "lucide-react";
+import { Clock, Mail, MapPin, Phone } from "lucide-react";
 import { PaymentBadgesCompact } from "@/components/PaymentBadges";
 import SocialLinks from "@/components/SocialLinks";
 import { categories } from "@/lib/products";
@@ -25,13 +25,8 @@ export default function Footer() {
                 className="mt-0.5 h-4 w-4 shrink-0 text-accent-500"
                 aria-hidden="true"
               />
-              <div>
-                <span>вул. Центральна, 74, смт Ратне, Волинська обл., 44100</span>
-                <span className="mt-1.5 inline-flex items-center gap-1.5 rounded-sm border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-700">
-                  <Store className="h-3.5 w-3.5" aria-hidden="true" />
-                  Самовивіз із магазину
-                </span>
-              </div>
+              {/* Самовивіз описано на сторінці «Доставка та оплата». */}
+              <span>вул. Центральна, 74, смт Ратне, Волинська обл., 44100</span>
             </li>
             <li className="flex items-start gap-2">
               <Phone
@@ -57,10 +52,10 @@ export default function Footer() {
             <li className="flex items-center gap-2">
               <Mail className="h-4 w-4 shrink-0 text-accent-500" aria-hidden="true" />
               <a
-                href="mailto:pangospod@gmail.com"
+                href="mailto:O_delfin@ukr.net"
                 className="font-semibold transition-colors hover:text-accent-600"
               >
-                pangospod@gmail.com
+                O_delfin@ukr.net
               </a>
             </li>
           </ul>

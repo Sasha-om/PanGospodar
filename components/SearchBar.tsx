@@ -54,7 +54,7 @@ export default function SearchBar() {
           type="search"
           value={query}
           onChange={(event) => updateQuery(event.target.value)}
-          placeholder="Пошук за назвою, артикулом або штрих-кодом..."
+          placeholder="Пошук за назвою, кодом або артикулом..."
           className="w-full bg-transparent px-3 py-2 text-sm text-stone-800 placeholder:text-stone-400 focus:outline-none"
         />
         <button
