@@ -175,6 +175,15 @@ export default async function ProductPage({
               />
               <CompareButton productId={product.id} variant="full" />
             </div>
+
+            {product.brand === "STIHL" ? (
+              <Link
+                href="/stihl-terms"
+                className="text-sm font-semibold text-accent-600 underline-offset-2 transition-colors hover:text-accent-700 hover:underline"
+              >
+                Умови доставки та оплати товарів STIHL
+              </Link>
+            ) : null}
           </div>
         </div>
 

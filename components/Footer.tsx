@@ -128,6 +128,14 @@ export default async function Footer() {
             </li>
             <li>
               <Link
+                href="/stihl-terms"
+                className="transition-colors hover:text-accent-600"
+              >
+                Умови доставки та оплати STIHL
+              </Link>
+            </li>
+            <li>
+              <Link
                 href="/contacts"
                 className="transition-colors hover:text-accent-600"
               >
