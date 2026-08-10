@@ -1,5 +1,11 @@
 import { neon } from "@neondatabase/serverless";
+import { unstable_cache } from "next/cache";
 import type { Product } from "@/lib/products";
+import {
+  DEFAULT_STORE_SETTINGS,
+  normalizeStoreSettings,
+  type StoreSettings,
+} from "@/lib/store-settings";
 import {
   InsufficientStockError,
   reservesStock,
@@ -81,6 +87,8 @@ interface ProductRow {
   brand?: string | null;
   image_url?: string | null;
   barcode?: string | null;
+  is_promo?: boolean | null;
+  is_bestseller?: boolean | null;
 }
 
 /** Keep only non-empty string pairs — the UI and filters assume clean data. */
@@ -146,6 +154,17 @@ export async function ensureProductsTable(): Promise<void> {
   await sql`
     CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)
   `;
+  // Merchandising markers set in the admin panel. Like brand/category/image_url
+  // these are admin-owned: `upsertProducts` never writes them, so they survive
+  // every УкрСклад synchronization.
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS is_promo boolean NOT NULL DEFAULT false
+  `;
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS is_bestseller boolean NOT NULL DEFAULT false
+  `;
   // Stock can never go below zero. This is the guard that makes overselling
   // impossible: two checkouts racing for the last item both try to write a
   // negative value, Postgres rejects the second, and its whole transaction —
@@ -190,6 +209,8 @@ function rowToProduct(row: ProductRow): Product {
     attributes: sanitizeAttributes(row.attributes),
     imageUrl: storedImage || LOCAL_PLACEHOLDER,
     categorySlug: safeCategorySlug(storedCategory || inferCategory(name)),
+    isPromo: row.is_promo === true,
+    isBestseller: row.is_bestseller === true,
   };
 }
 
@@ -244,6 +265,8 @@ export interface AdminProductUpdate {
   /** Empty string clears the barcode (stored as NULL). */
   barcode: string;
   attributes: Record<string, string>;
+  isPromo: boolean;
+  isBestseller: boolean;
 }
 
 /**
@@ -267,7 +290,7 @@ export async function updateProductFromAdmin(
   await sql`
     INSERT INTO products (
       sku, name, price, stock, brand, category, image_url, barcode,
-      attributes, updated_at
+      attributes, is_promo, is_bestseller, updated_at
     )
     VALUES (
       ${update.sku},
@@ -279,18 +302,22 @@ export async function updateProductFromAdmin(
       ${update.imageUrl},
       ${barcode},
       ${JSON.stringify(update.attributes)}::jsonb,
+      ${update.isPromo},
+      ${update.isBestseller},
       now()
     )
     ON CONFLICT (sku) DO UPDATE SET
-      name       = EXCLUDED.name,
-      price      = EXCLUDED.price,
-      stock      = EXCLUDED.stock,
-      brand      = EXCLUDED.brand,
-      category   = EXCLUDED.category,
-      image_url  = EXCLUDED.image_url,
-      barcode    = EXCLUDED.barcode,
-      attributes = EXCLUDED.attributes,
-      updated_at = now()
+      name          = EXCLUDED.name,
+      price         = EXCLUDED.price,
+      stock         = EXCLUDED.stock,
+      brand         = EXCLUDED.brand,
+      category      = EXCLUDED.category,
+      image_url     = EXCLUDED.image_url,
+      barcode       = EXCLUDED.barcode,
+      attributes    = EXCLUDED.attributes,
+      is_promo      = EXCLUDED.is_promo,
+      is_bestseller = EXCLUDED.is_bestseller,
+      updated_at    = now()
   `;
 }
 
@@ -335,6 +362,11 @@ export async function ensureOrdersTable(): Promise<void> {
   await sql`
     ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS stock_applied boolean NOT NULL DEFAULT false
+  `;
+  // "Купують разом" matches baskets with `items @> '[{"sku": "..."}]'`.
+  await sql`
+    CREATE INDEX IF NOT EXISTS orders_items_gin_idx
+    ON orders USING gin (items jsonb_path_ops)
   `;
 }
 
@@ -885,4 +917,152 @@ export async function upsertProducts(items: ImportItem[]): Promise<number> {
   }
 
   return affected;
+}
+
+/**
+ * SKUs that real customers ordered together with `sku`, most frequent first.
+ *
+ * Cancelled orders are excluded — those baskets were never actually bought.
+ * With a young order table this usually returns nothing, which is expected:
+ * the caller tops the list up with rule-based accessories.
+ */
+export async function findCoPurchasedSkus(
+  sku: string,
+  limit = 8,
+): Promise<string[]> {
+  if (!sku.trim() || !hasDatabase()) {
+    return [];
+  }
+
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 20);
+  // Containment match on the JSONB basket: `items @> '[{"sku": "..."}]'`.
+  const probe = JSON.stringify([{ sku }]);
+
+  try {
+    const rows = (await sql`
+      WITH baskets AS (
+        SELECT id, items
+        FROM orders
+        WHERE status <> 'CANCELLED' AND items @> ${probe}::jsonb
+      ),
+      lines AS (
+        SELECT b.id, item->>'sku' AS sku
+        FROM baskets b, LATERAL jsonb_array_elements(b.items) AS item
+      )
+      SELECT sku, COUNT(DISTINCT id)::int AS orders
+      FROM lines
+      WHERE COALESCE(sku, '') <> '' AND sku <> ${sku}
+      GROUP BY sku
+      ORDER BY orders DESC, sku
+      LIMIT ${safeLimit}
+    `) as { sku: string; orders: number }[];
+
+    return rows.map((row) => row.sku);
+  } catch (caught) {
+    // No orders table yet, or a malformed basket — recommendations are a
+    // nice-to-have and must never take the product page down.
+    if (!isMissingSchemaError(caught)) {
+      console.error(
+        `[recommendations] Co-purchase lookup failed: ${caught instanceof Error ? caught.message : String(caught)}`,
+      );
+    }
+    return [];
+  }
+}
+
+/* ----------------------------- store settings ---------------------------- */
+
+/**
+ * Contact details shown across the site, editable in the admin panel.
+ *
+ * Stored as key/value rows rather than one wide row: adding a setting later
+ * needs no migration, and a half-written value can never blank out a field
+ * (`normalizeStoreSettings` falls back to the default per key).
+ */
+export async function ensureSettingsTable(): Promise<void> {
+  const sql = getSql();
+  await sql`
+    CREATE TABLE IF NOT EXISTS store_settings (
+      key        text PRIMARY KEY,
+      value      text NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+}
+
+/** Raw read. Returns the defaults when the table or the database is missing. */
+async function readStoreSettings(): Promise<StoreSettings> {
+  if (!hasDatabase()) {
+    return DEFAULT_STORE_SETTINGS;
+  }
+
+  const sql = getSql();
+  const run = async () =>
+    (await sql`SELECT key, value FROM store_settings`) as {
+      key: string;
+      value: string;
+    }[];
+
+  let rows: { key: string; value: string }[];
+  try {
+    rows = await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) {
+      // Never break the whole site over a settings read — fall back instead.
+      console.error(
+        `[settings] Read failed: ${caught instanceof Error ? caught.message : String(caught)}`,
+      );
+      return DEFAULT_STORE_SETTINGS;
+    }
+    await ensureSettingsTable();
+    rows = [];
+  }
+
+  return normalizeStoreSettings(
+    Object.fromEntries(rows.map((row) => [row.key, row.value])),
+  );
+}
+
+/** Invalidated by the admin save action. */
+export const STORE_SETTINGS_TAG = "store-settings";
+
+/**
+ * Settings as rendered on the site.
+ *
+ * Cached so the header and footer do not cost a database round trip on every
+ * page view. `saveStoreSettings` invalidates the tag, so an edit shows up
+ * immediately; the one-minute lifetime is a safety net in case an invalidation
+ * is ever missed, rather than the normal path.
+ */
+export const getStoreSettings = unstable_cache(
+  readStoreSettings,
+  ["store-settings"],
+  { tags: [STORE_SETTINGS_TAG], revalidate: 60 },
+);
+
+/** Write every field in one statement. */
+export async function saveStoreSettings(values: StoreSettings): Promise<void> {
+  const sql = getSql();
+  const keys = Object.keys(values);
+  const entries = keys.map((key) => values[key as keyof StoreSettings]);
+
+  const run = async () => {
+    await sql`
+      INSERT INTO store_settings (key, value, updated_at)
+      SELECT k, v, now()
+      FROM UNNEST(${keys}::text[], ${entries}::text[]) AS t(k, v)
+      ON CONFLICT (key) DO UPDATE SET
+        value      = EXCLUDED.value,
+        updated_at = now()
+    `;
+  };
+
+  try {
+    await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureSettingsTable();
+    await run();
+  }
 }

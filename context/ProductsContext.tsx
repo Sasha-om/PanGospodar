@@ -113,6 +113,8 @@ export function ProductsProvider({
           imageUrl: product.imageUrl,
           barcode: product.barcode ?? "",
           attributes: product.attributes ?? {},
+          isPromo: product.isPromo === true,
+          isBestseller: product.isBestseller === true,
         }),
       });
       if (!response.ok) {

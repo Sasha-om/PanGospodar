@@ -4,23 +4,29 @@ import { Clock, Phone } from "lucide-react";
 import CartBadge from "@/components/CartBadge";
 import CategoryNav, { CategoryNavFallback } from "@/components/CategoryNav";
 import SearchBar from "@/components/SearchBar";
+import { getStoreSettings } from "@/lib/db";
+import { hourSegments, telHref } from "@/lib/store-settings";
 
-export default function Header() {
+export default async function Header() {
+  const settings = await getStoreSettings();
+  // The top bar is tight, so only the first line of the schedule fits.
+  const primaryHours = hourSegments(settings.hours)[0] ?? settings.hours;
+
   return (
     <header className="bg-white">
       {/* Trust top bar: contact phone + working hours */}
       <div className="border-b border-stone-200 bg-stone-100 text-stone-600">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-1.5 text-xs sm:justify-end sm:gap-6 sm:px-6">
           <a
-            href="tel:+380673413751"
+            href={telHref(settings.phone)}
             className="flex items-center gap-1.5 font-semibold transition-colors duration-100 hover:text-accent-600"
           >
             <Phone className="h-3.5 w-3.5 text-accent-500" aria-hidden="true" />
-            +38 (067) 341-37-51
+            {settings.phone}
           </a>
           <span className="flex items-center gap-1.5">
             <Clock className="h-3.5 w-3.5 text-accent-500" aria-hidden="true" />
-            <span className="hidden sm:inline">Пн-Пт: </span>08:30 - 18:00
+            {primaryHours}
           </span>
         </div>
       </div>

@@ -7,6 +7,7 @@ import { SlidersHorizontal, X } from "lucide-react";
 import ProductCard from "@/components/ProductCard";
 import { useProducts } from "@/context/ProductsContext";
 import {
+  PRODUCT_BADGES,
   categories,
   getProductAttributes,
   getSubcategoryBySlug,
@@ -15,6 +16,8 @@ import {
 
 const SORT_OPTIONS = [
   { value: "default", label: "За замовчуванням" },
+  { value: "promo-first", label: "Спочатку акційні" },
+  { value: "bestseller-first", label: "Спочатку топ продажів" },
   { value: "price-asc", label: "Від дешевих до дорогих" },
   { value: "price-desc", label: "Від дорогих до дешевих" },
   { value: "name-asc", label: "За назвою: А – Я" },
@@ -119,6 +122,8 @@ export default function CatalogBrowser({
     setSelectedCategories(categoryParam ? [categoryParam] : []);
   }
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
+  /** Badge `field` names ("isPromo", "isBestseller") the customer ticked. */
+  const [selectedBadges, setSelectedBadges] = useState<string[]>([]);
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [sort, setSort] = useState<SortValue>("default");
@@ -163,6 +168,16 @@ export default function CatalogBrowser({
   const brandOptions = useMemo(
     () =>
       toOptions(scopedProducts.map((product) => product.brand).filter(Boolean)),
+    [scopedProducts],
+  );
+
+  // Only offer a badge that some product in scope actually carries, so the
+  // filter never leads to a guaranteed-empty result.
+  const badgeOptions = useMemo<FilterOption[]>(
+    () =>
+      PRODUCT_BADGES.filter((badge) =>
+        scopedProducts.some((product) => product[badge.field] === true),
+      ).map((badge) => ({ value: badge.field, label: badge.label })),
     [scopedProducts],
   );
 
@@ -218,6 +233,14 @@ export default function CatalogBrowser({
       if (selectedBrands.length && !selectedBrands.includes(product.brand)) {
         return false;
       }
+      // Ticking both means "акційні АБО топ продажів", which is what a shopper
+      // scanning for deals expects — not the empty intersection of the two.
+      if (
+        selectedBadges.length &&
+        !selectedBadges.some((field) => product[field as "isPromo"] === true)
+      ) {
+        return false;
+      }
       if (min !== null && !Number.isNaN(min) && product.price < min) {
         return false;
       }
@@ -237,7 +260,18 @@ export default function CatalogBrowser({
       return true;
     });
 
+    // Stable within each group: flagged items float up, the rest keep the
+    // order they already had.
+    const badgeFirst = (field: "isPromo" | "isBestseller") =>
+      [...filtered].sort(
+        (a, b) => Number(b[field] === true) - Number(a[field] === true),
+      );
+
     switch (sort) {
+      case "promo-first":
+        return badgeFirst("isPromo");
+      case "bestseller-first":
+        return badgeFirst("isBestseller");
       case "price-asc":
         return [...filtered].sort((a, b) => a.price - b.price);
       case "price-desc":
@@ -251,6 +285,7 @@ export default function CatalogBrowser({
     scopedProducts,
     selectedCategories,
     selectedBrands,
+    selectedBadges,
     selectedAttributes,
     minPrice,
     maxPrice,
@@ -260,6 +295,7 @@ export default function CatalogBrowser({
   const activeFilterCount =
     selectedCategories.length +
     selectedBrands.length +
+    selectedBadges.length +
     Object.values(selectedAttributes).reduce(
       (sum, values) => sum + values.length,
       0,
@@ -270,6 +306,7 @@ export default function CatalogBrowser({
   function resetFilters() {
     setSelectedCategories([]);
     setSelectedBrands([]);
+    setSelectedBadges([]);
     setSelectedAttributes({});
     setMinPrice("");
     setMaxPrice("");
@@ -327,6 +364,15 @@ export default function CatalogBrowser({
           selected={selectedCategories}
           onToggle={(value) =>
             setSelectedCategories((prev) => toggleValue(prev, value))
+          }
+        />
+
+        <FilterGroup
+          legend="Позначки"
+          options={badgeOptions}
+          selected={selectedBadges}
+          onToggle={(value) =>
+            setSelectedBadges((prev) => toggleValue(prev, value))
           }
         />
 

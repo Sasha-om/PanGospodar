@@ -81,6 +81,8 @@ export async function POST(request: Request) {
       imageUrl: String(payload.imageUrl ?? "").trim(),
       barcode: String(payload.barcode ?? "").trim(),
       attributes: sanitizeAttributes(payload.attributes),
+      isPromo: payload.isPromo === true,
+      isBestseller: payload.isBestseller === true,
     });
     return json({ success: true, sku }, 200);
   } catch (caught) {

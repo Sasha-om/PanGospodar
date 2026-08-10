@@ -1,34 +1,20 @@
 import { MapPin } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import SocialLinks from "@/components/SocialLinks";
+import { getStoreSettings } from "@/lib/db";
+import { hourSegments, mailHref, telHref } from "@/lib/store-settings";
 
 const MAP_URL = "https://maps.app.goo.gl/oZFzRkEMtAytRYZT8";
 
-const contactItems = [
-  {
-    label: "Телефон",
-    value: "+38 (067) 341-37-51",
-    href: "tel:+380673413751",
-  },
-  {
-    label: "Email",
-    value: "O_delfin@ukr.net",
-    href: "mailto:O_delfin@ukr.net",
-  },
-  {
-    label: "Адреса",
-    value: "вул. Центральна, 74, смт Ратне, Волинська область, 44100",
-    href: MAP_URL,
-  },
-];
+export default async function ContactsPage() {
+  const settings = await getStoreSettings();
 
-const workingHours = [
-  { day: "Понеділок – П'ятниця", hours: "08:30 – 18:00" },
-  { day: "Субота", hours: "09:00 – 15:00" },
-  { day: "Неділя", hours: "Вихідний" },
-];
+  const contactItems = [
+    { label: "Телефон", value: settings.phone, href: telHref(settings.phone) },
+    { label: "Email", value: settings.email, href: mailHref(settings.email) },
+    { label: "Адреса", value: settings.address, href: MAP_URL },
+  ];
 
-export default function ContactsPage() {
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-orange-100/50 to-stone-100">
       <PageHeader
@@ -84,18 +70,26 @@ export default function ContactsPage() {
             <h2 className="text-xl font-bold text-stone-800">
               Графік роботи
             </h2>
+            {/* One row per segment of the schedule set in the admin panel. */}
             <ul className="mt-4 flex flex-col gap-2">
-              {workingHours.map((entry) => (
-                <li
-                  key={entry.day}
-                  className="flex items-center justify-between border-b border-stone-200 pb-2 text-sm"
-                >
-                  <span className="text-stone-600">{entry.day}</span>
-                  <span className="font-semibold text-stone-800">
-                    {entry.hours}
-                  </span>
-                </li>
-              ))}
+              {hourSegments(settings.hours).map((segment) => {
+                // "Пн-Пт: 08:30 – 18:00" → day on the left, hours on the right.
+                const [day, ...rest] = segment.split(":");
+                const hours = rest.join(":").trim();
+                return (
+                  <li
+                    key={segment}
+                    className="flex items-center justify-between gap-4 border-b border-stone-200 pb-2 text-sm"
+                  >
+                    <span className="text-stone-600">{day.trim()}</span>
+                    {hours ? (
+                      <span className="font-semibold text-stone-800">
+                        {hours}
+                      </span>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           </section>
         </div>
@@ -107,9 +101,7 @@ export default function ContactsPage() {
           className="mt-10 flex h-56 flex-col items-center justify-center gap-2 rounded-sm border border-stone-200 bg-white text-center text-sm text-stone-600 transition-colors hover:border-accent-500 hover:text-accent-600"
         >
           <MapPin className="h-7 w-7 text-accent-500" aria-hidden="true" />
-          <span className="font-semibold">
-            вул. Центральна, 74, смт Ратне, Волинська область
-          </span>
+          <span className="font-semibold">{settings.address}</span>
           <span className="text-xs text-stone-500">
             Натисніть, щоб відкрити карту проїзду в Google Maps
           </span>

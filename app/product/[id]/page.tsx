@@ -2,8 +2,12 @@ import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
+import CompareButton from "@/components/CompareButton";
+import ProductCarousel from "@/components/ProductCarousel";
 import { loadProducts } from "@/lib/catalog";
+import { findCoPurchasedSkus } from "@/lib/db";
 import { getProductAttributes } from "@/lib/products";
+import { findBoughtTogether, findSimilarProducts } from "@/lib/recommendations";
 
 // Read the live sync feed on every request so prices/stock are current.
 export const dynamic = "force-dynamic";
@@ -35,6 +39,16 @@ export default async function ProductPage({
     label,
     value,
   }));
+
+  // Real baskets first; the rules in `findBoughtTogether` fill the rest. The
+  // lookup never throws — an empty list simply means "no history yet".
+  const coPurchasedSkus = await findCoPurchasedSkus(product.sku ?? product.id);
+  const similar = findSimilarProducts(product, products);
+  const boughtTogether = findBoughtTogether(product, products, coPurchasedSkus);
+  // Drives the subtitle, so the block is honest about where its picks came from.
+  const hasRealHistory = coPurchasedSkus.some((sku) =>
+    boughtTogether.some((item) => (item.sku ?? item.id) === sku),
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-orange-100/50 to-stone-100">
@@ -148,18 +162,36 @@ export default async function ProductPage({
               </div>
             ) : null}
 
-            <AddToCartButton
-              disabled={!inStock}
-              product={{
-                id: product.id,
-                name: product.name,
-                price: product.price,
-                imageUrl: product.imageUrl,
-                stock,
-              }}
-            />
+            <div className="flex flex-wrap gap-3">
+              <AddToCartButton
+                disabled={!inStock}
+                product={{
+                  id: product.id,
+                  name: product.name,
+                  price: product.price,
+                  imageUrl: product.imageUrl,
+                  stock,
+                }}
+              />
+              <CompareButton productId={product.id} variant="full" />
+            </div>
           </div>
         </div>
+
+        <ProductCarousel
+          title="Схожі товари"
+          subtitle="З тієї ж групи та в близькій ціні"
+          products={similar}
+        />
+        <ProductCarousel
+          title="Купують разом"
+          subtitle={
+            hasRealHistory
+              ? "За історією замовлень нашого магазину"
+              : "Витратні матеріали й аксесуари до цього інструмента"
+          }
+          products={boughtTogether}
+        />
       </main>
     </div>
   );

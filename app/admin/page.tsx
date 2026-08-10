@@ -21,6 +21,7 @@ import ProductFormModal, {
   EMPTY_PRODUCT_FORM,
   toFormValues,
 } from "@/components/admin/ProductFormModal";
+import StoreSettingsForm from "@/components/admin/StoreSettingsForm";
 import { useProducts } from "@/context/ProductsContext";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
@@ -478,63 +479,7 @@ export default function AdminPage() {
             </section>
           ) : null}
 
-          {activeSection === "settings" ? (
-            <section className="rounded-xl border border-graphite-200 bg-white p-5 sm:p-6">
-              <h2 className="text-lg font-bold text-graphite-950">
-                Налаштування магазину
-              </h2>
-              <form
-                onSubmit={(event) => event.preventDefault()}
-                className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2"
-              >
-                {[
-                  { id: "store-name", label: "Назва магазину", value: "ПанГосподар" },
-                  { id: "store-phone", label: "Телефон", value: "+38 (067) 341-37-51" },
-                  { id: "store-email", label: "Email", value: "O_delfin@ukr.net" },
-                  { id: "store-hours", label: "Графік роботи", value: "Пн-Пт 08:30 – 18:00" },
-                ].map((field) => (
-                  <div key={field.id}>
-                    <label
-                      htmlFor={field.id}
-                      className="text-xs font-semibold uppercase tracking-wide text-graphite-500"
-                    >
-                      {field.label}
-                    </label>
-                    <input
-                      id={field.id}
-                      type="text"
-                      defaultValue={field.value}
-                      className="mt-1.5 w-full rounded-lg border border-graphite-200 px-3 py-2 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
-                    />
-                  </div>
-                ))}
-
-                <div className="sm:col-span-2">
-                  <label
-                    htmlFor="store-address"
-                    className="text-xs font-semibold uppercase tracking-wide text-graphite-500"
-                  >
-                    Адреса
-                  </label>
-                  <input
-                    id="store-address"
-                    type="text"
-                    defaultValue="вул. Центральна, 74, смт Ратне, Волинська область, 44100"
-                    className="mt-1.5 w-full rounded-lg border border-graphite-200 px-3 py-2 text-sm text-graphite-900 focus:border-accent-500 focus:outline-none"
-                  />
-                </div>
-
-                <div className="sm:col-span-2">
-                  <button
-                    type="submit"
-                    className="rounded-lg bg-accent-500 px-6 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent-600"
-                  >
-                    Зберегти зміни
-                  </button>
-                </div>
-              </form>
-            </section>
-          ) : null}
+          {activeSection === "settings" ? <StoreSettingsForm /> : null}
         </main>
       </div>
 

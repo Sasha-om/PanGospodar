@@ -1,9 +1,44 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ImageOff, Plus, Trash2, X } from "lucide-react";
+import { upload } from "@vercel/blob/client";
+import { ImageOff, Loader2, Plus, Trash2, Upload, X } from "lucide-react";
 import { placeholderImage, type ProductInput } from "@/context/ProductsContext";
-import { categories, getProductAttributes, type Product } from "@/lib/products";
+import {
+  PRODUCT_BADGES,
+  categories,
+  getProductAttributes,
+  type Product,
+} from "@/lib/products";
+
+/** Kept in step with `maximumSizeInBytes` in /api/admin/upload. */
+const MAX_UPLOAD_MB = 10;
+
+/** Blob accepts most characters, but a tidy ASCII-ish name is easier to read. */
+function safeFileName(name: string): string {
+  const cleaned = name
+    .replace(/[\\/]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/[^\w.\-]/g, "");
+  return cleaned || "photo.jpg";
+}
+
+/** Turn SDK/network failures into something an admin can act on. */
+function uploadErrorMessage(message: string): string {
+  if (/unauthorized|401/i.test(message)) {
+    return "Сесія завершилася. Увійдіть в адмін-панель ще раз.";
+  }
+  if (/token/i.test(message)) {
+    return (
+      "Сховище Vercel Blob не налаштоване: немає змінної BLOB_READ_WRITE_TOKEN. " +
+      "Додайте її у Vercel → Storage → Blob і зробіть Redeploy."
+    );
+  }
+  if (/size|large/i.test(message)) {
+    return `Файл завеликий. Максимум — ${MAX_UPLOAD_MB} МБ.`;
+  }
+  return `Не вдалося завантажити файл: ${message}`;
+}
 
 /** One editable characteristic row. `id` keeps React keys stable while typing. */
 export interface AttributeRow {
@@ -22,6 +57,8 @@ export interface ProductFormValues {
   imageUrl: string;
   shortDescription: string;
   attributes: AttributeRow[];
+  isPromo: boolean;
+  isBestseller: boolean;
 }
 
 let attributeIdCounter = 0;
@@ -40,6 +77,8 @@ export const EMPTY_PRODUCT_FORM: ProductFormValues = {
   imageUrl: "",
   shortDescription: "",
   attributes: [],
+  isPromo: false,
+  isBestseller: false,
 };
 
 const fieldClass =
@@ -64,6 +103,9 @@ export default function ProductFormModal({
   const [values, setValues] = useState<ProductFormValues>(initialValues);
   const [error, setError] = useState<string | null>(null);
   const [imageError, setImageError] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -85,6 +127,56 @@ export default function ProductFormModal({
     value: ProductFormValues[K],
   ) {
     setValues((prev) => ({ ...prev, [key]: value }));
+  }
+
+  /* ------------------------------ photo upload --------------------------- */
+
+  /**
+   * Send the chosen file straight to Vercel Blob and put the resulting public
+   * URL into the image field. The file does not pass through our server —
+   * `/api/admin/upload` only issues a token — so phone-sized photos are fine.
+   */
+  async function handleFileSelected(
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = event.target.files?.[0];
+    // Reset immediately so picking the same file twice fires onChange again.
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    setUploadError(null);
+    if (!file.type.startsWith("image/")) {
+      setUploadError("Оберіть файл зображення.");
+      return;
+    }
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      setUploadError(
+        `Файл завеликий (${(file.size / 1024 / 1024).toFixed(1)} МБ). Максимум — ${MAX_UPLOAD_MB} МБ.`,
+      );
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      const result = await upload(`products/${safeFileName(file.name)}`, file, {
+        access: "public",
+        handleUploadUrl: "/api/admin/upload",
+        onUploadProgress: ({ percentage }) => {
+          setUploadProgress(Math.round(percentage));
+        },
+      });
+      setField("imageUrl", result.url);
+      setImageError(false);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      console.error("[admin/upload] Failed:", caught);
+      setUploadError(uploadErrorMessage(message));
+    } finally {
+      setUploading(false);
+    }
   }
 
   /* ----------------------------- attributes ----------------------------- */
@@ -163,6 +255,8 @@ export default function ProductFormModal({
       shortDescription: values.shortDescription.trim(),
       techSpecs: { power: "", weight: "", warranty: "" },
       attributes,
+      isPromo: values.isPromo,
+      isBestseller: values.isBestseller,
     });
   }
 
@@ -295,8 +389,96 @@ export default function ProductFormModal({
             </div>
 
             <div className="sm:col-span-2">
+              <span className={labelClass}>Позначки</span>
+              <div className="mt-1.5 flex flex-wrap gap-3">
+                {PRODUCT_BADGES.map((badge) => (
+                  <label
+                    key={badge.field}
+                    className="flex cursor-pointer items-center gap-2 rounded-sm border border-stone-200 px-3 py-2 text-sm font-semibold text-stone-700 transition-colors hover:border-accent-500"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-accent-500"
+                      checked={values[badge.field] === true}
+                      onChange={(event) =>
+                        setField(badge.field, event.target.checked)
+                      }
+                    />
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${badge.className}`}
+                    >
+                      {badge.label}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <p className="mt-1 text-xs text-stone-500">
+                Показуються бейджем на картці товару. Синхронізація з УкрСклад їх
+                не скидає.
+              </p>
+            </div>
+
+            <div className="sm:col-span-2">
+              <span className={labelClass}>Фотографія товару</span>
+              <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                <label
+                  htmlFor="pf-file"
+                  className={`flex items-center gap-2 rounded-sm border px-4 py-2 text-sm font-bold transition-colors ${
+                    uploading
+                      ? "cursor-not-allowed border-stone-200 bg-stone-100 text-stone-400"
+                      : "cursor-pointer border-accent-500 bg-accent-50 text-accent-700 hover:bg-accent-100"
+                  }`}
+                >
+                  {uploading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Upload className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  {uploading
+                    ? `Завантаження… ${uploadProgress}%`
+                    : "Завантажити з пристрою"}
+                </label>
+                <input
+                  id="pf-file"
+                  type="file"
+                  accept="image/*"
+                  disabled={uploading}
+                  onChange={handleFileSelected}
+                  className="sr-only"
+                />
+              </div>
+
+              {uploading ? (
+                <div
+                  className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-stone-200"
+                  role="progressbar"
+                  aria-valuenow={uploadProgress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div
+                    className="h-full bg-accent-500 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+              ) : null}
+
+              {uploadError ? (
+                <p className="mt-2 rounded-sm border-l-4 border-red-500 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
+                  {uploadError}
+                </p>
+              ) : null}
+
+              <p className="mt-1 text-xs text-stone-500">
+                JPEG, PNG, WebP, AVIF або GIF, до {MAX_UPLOAD_MB} МБ. Файл
+                зберігається у Vercel Blob, а посилання підставляється в поле
+                нижче.
+              </p>
+            </div>
+
+            <div className="sm:col-span-2">
               <label htmlFor="pf-image" className={labelClass}>
-                URL фотографії
+                …або URL фотографії
               </label>
               <input
                 id="pf-image"
@@ -460,5 +642,7 @@ export function toFormValues(product: Product): ProductFormValues {
     attributes: getProductAttributes(product).map(([label, value]) =>
       newAttributeRow(label, value),
     ),
+    isPromo: product.isPromo === true,
+    isBestseller: product.isBestseller === true,
   };
 }

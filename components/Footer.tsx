@@ -3,8 +3,12 @@ import { Clock, Mail, MapPin, Phone } from "lucide-react";
 import { PaymentBadgesCompact } from "@/components/PaymentBadges";
 import SocialLinks from "@/components/SocialLinks";
 import { categories } from "@/lib/products";
+import { getStoreSettings } from "@/lib/db";
+import { hourSegments, mailHref, telHref } from "@/lib/store-settings";
 
-export default function Footer() {
+export default async function Footer() {
+  const settings = await getStoreSettings();
+
   return (
     <footer className="border-t border-stone-200 bg-stone-100 text-stone-600">
       <div className="mx-auto grid max-w-7xl grid-cols-1 gap-8 px-4 py-12 sm:grid-cols-3 sm:px-6">
@@ -26,7 +30,7 @@ export default function Footer() {
                 aria-hidden="true"
               />
               {/* Самовивіз описано на сторінці «Доставка та оплата». */}
-              <span>вул. Центральна, 74, смт Ратне, Волинська обл., 44100</span>
+              <span>{settings.address}</span>
             </li>
             <li className="flex items-start gap-2">
               <Phone
@@ -35,27 +39,27 @@ export default function Footer() {
               />
               <div>
                 <a
-                  href="tel:+380673413751"
+                  href={telHref(settings.phone)}
                   className="font-semibold transition-colors hover:text-accent-600"
                 >
-                  +38 (067) 341-37-51
+                  {settings.phone}
                 </a>
                 <span className="mt-1 flex items-start gap-1.5 text-xs text-stone-500">
                   <Clock
                     className="mt-0.5 h-3.5 w-3.5 shrink-0 text-stone-400"
                     aria-hidden="true"
                   />
-                  Пн-Пт: 08:30 - 18:00, Сб: 09:00 - 15:00
+                  {hourSegments(settings.hours).join(", ")}
                 </span>
               </div>
             </li>
             <li className="flex items-center gap-2">
               <Mail className="h-4 w-4 shrink-0 text-accent-500" aria-hidden="true" />
               <a
-                href="mailto:O_delfin@ukr.net"
+                href={mailHref(settings.email)}
                 className="font-semibold transition-colors hover:text-accent-600"
               >
-                O_delfin@ukr.net
+                {settings.email}
               </a>
             </li>
           </ul>
@@ -137,7 +141,7 @@ export default function Footer() {
       <div className="border-t border-stone-200 px-4 py-4 sm:px-6">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 sm:flex-row">
           <p className="text-xs text-stone-400">
-            © {new Date().getFullYear()} ПанГосподар. Усі права захищені.
+            © {new Date().getFullYear()} {settings.name}. Усі права захищені.
           </p>
           <PaymentBadgesCompact />
         </div>

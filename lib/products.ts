@@ -50,6 +50,45 @@ export interface Product {
   attributes?: Record<string, string>;
   imageUrl: string;
   categorySlug: string;
+  /** Admin-set "Акція" marker. Survives every УкрСклад import. */
+  isPromo?: boolean;
+  /** Admin-set "Топ продажів" marker. */
+  isBestseller?: boolean;
+}
+
+/**
+ * Merchandising markers an admin can put on a product.
+ *
+ * Declared once so the admin checkboxes, the card badge and the catalog filter
+ * can never drift apart. `field` is the column on `Product`; `column` is the
+ * matching `products` column.
+ */
+export const PRODUCT_BADGES = [
+  {
+    field: "isPromo",
+    column: "is_promo",
+    label: "Акція",
+    /** Tailwind classes for the badge pill on the product card. */
+    className: "border-red-200 bg-red-500 text-white",
+  },
+  {
+    field: "isBestseller",
+    column: "is_bestseller",
+    label: "Топ продажів",
+    className: "border-amber-200 bg-amber-400 text-stone-900",
+  },
+] as const satisfies readonly {
+  field: keyof Product;
+  column: string;
+  label: string;
+  className: string;
+}[];
+
+export type ProductBadge = (typeof PRODUCT_BADGES)[number];
+
+/** Badges actually set on a product, in declaration order. */
+export function getProductBadges(product: Product): ProductBadge[] {
+  return PRODUCT_BADGES.filter((badge) => product[badge.field] === true);
 }
 
 /**
@@ -183,6 +222,19 @@ export const subcategories: Subcategory[] = [
 
 export function getSubcategoriesByCategory(categorySlug: string): Subcategory[] {
   return subcategories.filter((sub) => sub.categorySlug === categorySlug);
+}
+
+/**
+ * Which subcategory a product belongs to, inferred from its name the same way
+ * the mega-menu does it. Returns `undefined` when nothing matches — plenty of
+ * rows are generic enough to sit in a category without a subcategory.
+ */
+export function findSubcategory(product: Product): Subcategory | undefined {
+  return subcategories.find(
+    (sub) =>
+      sub.categorySlug === product.categorySlug &&
+      new RegExp(sub.pattern, "i").test(product.name),
+  );
 }
 
 export function getSubcategoryBySlug(slug: string): Subcategory | undefined {
