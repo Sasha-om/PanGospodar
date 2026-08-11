@@ -1,6 +1,10 @@
 /**
  * Hero composite: the three main tool groups as premium two-tone badges.
- * Main strokes inherit stone; accent details are drawn in brand orange.
+ *
+ * Sits on top of the storefront photo, so the cards are glass rather than
+ * solid white — three opaque panels would cover the shop front and the STIHL
+ * sign, which is the whole point of the photo. Main strokes are white for
+ * contrast on the darkened image; accent details stay brand orange.
  */
 
 const mainStroke = {
@@ -22,7 +26,7 @@ const accentStroke = {
 function ChainsawArt({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" className={className} aria-hidden="true">
-      <g {...mainStroke} className="text-stone-700">
+      <g {...mainStroke} className="text-white">
         {/* engine body */}
         <rect x="3" y="11" width="13" height="11" rx="3" />
         {/* top carry handle */}
@@ -32,7 +36,7 @@ function ChainsawArt({ className }: { className?: string }) {
         {/* rear grip */}
         <path d="M3 16.5H2" />
       </g>
-      <g {...accentStroke} className="text-accent-500">
+      <g {...accentStroke} className="text-accent-400">
         {/* chain teeth along the bar */}
         <path d="M18.5 13.2v-1.4M22 13.2v-1.4M25.5 13.2v-1.4" />
         {/* cooling fins */}
@@ -45,7 +49,7 @@ function ChainsawArt({ className }: { className?: string }) {
 function LawnmowerArt({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" className={className} aria-hidden="true">
-      <g {...mainStroke} className="text-stone-700">
+      <g {...mainStroke} className="text-white">
         {/* deck */}
         <path d="M5 22v-6a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v6" />
         {/* grass box */}
@@ -56,7 +60,7 @@ function LawnmowerArt({ className }: { className?: string }) {
         <circle cx="9" cy="24.5" r="2.5" />
         <circle cx="18" cy="24.5" r="2.5" />
       </g>
-      <g {...accentStroke} className="text-accent-500">
+      <g {...accentStroke} className="text-accent-400">
         {/* grass tufts under the deck */}
         <path d="M13 24.5v2M13.5 24.8l1.5 1.4M12.5 24.8 11 26.2" />
       </g>
@@ -67,7 +71,7 @@ function LawnmowerArt({ className }: { className?: string }) {
 function DrillArt({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 32 32" className={className} aria-hidden="true">
-      <g {...mainStroke} className="text-stone-700">
+      <g {...mainStroke} className="text-white">
         {/* motor housing */}
         <path d="M7 9h11a3 3 0 0 1 3 3v5a3 3 0 0 1-3 3H7Z" />
         {/* rear cap */}
@@ -77,7 +81,7 @@ function DrillArt({ className }: { className?: string }) {
         {/* grip */}
         <path d="M10 20v5a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-5" />
       </g>
-      <g {...accentStroke} className="text-accent-500">
+      <g {...accentStroke} className="text-accent-400">
         {/* drill bit */}
         <path d="M25 14.5h5" />
         <path d="M26.5 13.2v2.6M28.5 13.2v2.6" />
@@ -100,16 +104,16 @@ export default function HeroShowcase() {
       {showcaseItems.map(({ label, Art }, index) => (
         <div
           key={label}
-          className={`flex items-center gap-4 rounded-sm border border-stone-200 bg-white p-3.5 ${
+          className={`flex items-center gap-4 rounded-sm border border-white/20 bg-white/10 p-3.5 backdrop-blur-md ${
             index === 1 ? "lg:translate-x-6" : ""
           }`}
         >
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-orange-50">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/15">
             <Art className="h-8 w-8" />
           </span>
           <div className="min-w-0">
-            <div className="text-sm font-bold text-stone-800">{label}</div>
-            <div className="mt-1 h-1 w-14 rounded-full bg-accent-500" />
+            <div className="text-sm font-bold text-white">{label}</div>
+            <div className="mt-1 h-1 w-14 rounded-full bg-accent-400" />
           </div>
         </div>
       ))}

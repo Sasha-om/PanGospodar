@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { Boxes, Check, ShieldCheck, Truck } from "lucide-react";
 import HeroShowcase from "@/components/HeroShowcase";
@@ -32,17 +33,46 @@ const trustBadges = [
 export default function Home() {
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-orange-100/50 to-stone-100">
-      {/* Hero on the warm kraft base */}
-      <section className="border-b border-stone-200">
-        <div className="mx-auto grid max-w-7xl items-center gap-8 px-4 py-10 sm:px-6 sm:py-14 lg:grid-cols-[1.1fr_1fr]">
+      {/* Hero over the storefront photo */}
+      <section className="relative isolate overflow-hidden border-b border-stone-200">
+        {/*
+          The shop front in Ратне. The dark base sits *under* the photo on
+          purpose: if the file is ever missing the hero degrades to a solid
+          brand-dark panel with the same legible text, instead of a broken
+          image with unreadable copy on top.
+        */}
+        <div className="absolute inset-0 -z-10 bg-graphite-950">
+          {/*
+            The hero is far wider than the photo, so `cover` crops vertically.
+            Biasing the crop upward keeps the STIHL sign and the entrance in
+            frame and drops the empty pavement instead.
+          */}
+          <Image
+            src="/store-front.jpg"
+            alt=""
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover object-[center_25%]"
+          />
+          {/*
+            Two scrims. The horizontal one is heavy on the left, where the copy
+            sits, and thins out to the right so the STIHL sign and the entrance
+            stay visible rather than being washed out.
+          */}
+          <div className="absolute inset-0 bg-gradient-to-r from-graphite-950/92 via-graphite-950/75 to-graphite-950/35" />
+          <div className="absolute inset-0 bg-gradient-to-t from-graphite-950/75 via-transparent to-graphite-950/45" />
+        </div>
+
+        <div className="mx-auto grid max-w-7xl items-center gap-8 px-4 py-14 sm:px-6 sm:py-20 lg:grid-cols-[1.1fr_1fr]">
           <div>
-            <p className="text-sm font-bold uppercase tracking-widest text-accent-500">
+            <p className="text-sm font-bold uppercase tracking-widest text-accent-400">
               PanGospodar
             </p>
-            <h1 className="mt-2 max-w-2xl text-3xl font-extrabold text-stone-800 sm:text-4xl">
+            <h1 className="mt-2 max-w-2xl text-3xl font-extrabold text-white drop-shadow-sm sm:text-4xl">
               Надійний інструмент для роботи та господарства
             </h1>
-            <p className="mt-3 max-w-2xl text-stone-600">
+            <p className="mt-3 max-w-2xl text-stone-200">
               Бензо- та електроінструменти для саду, городу та майстерні.
               Перевірені моделі провідних брендів з офіційною гарантією.
             </p>
@@ -54,9 +84,11 @@ export default function Home() {
               >
                 Переглянути каталог
               </Link>
+              {/* Glass instead of solid white: keeps the photo readable
+                  behind the button while still reading as a button. */}
               <Link
                 href="/delivery"
-                className="rounded-sm border border-stone-300 bg-white px-6 py-2.5 text-sm font-bold text-stone-800 transition-colors duration-100 hover:border-accent-500 hover:text-accent-600"
+                className="rounded-sm border border-white/40 bg-white/10 px-6 py-2.5 text-sm font-bold text-white backdrop-blur-sm transition-colors duration-100 hover:border-white hover:bg-white/20"
               >
                 Доставка та оплата
               </Link>
@@ -67,10 +99,10 @@ export default function Home() {
               {heroChecks.map((check) => (
                 <li
                   key={check}
-                  className="flex items-center gap-1.5 text-sm font-medium text-stone-600"
+                  className="flex items-center gap-1.5 text-sm font-medium text-stone-100"
                 >
                   <Check
-                    className="h-4 w-4 shrink-0 text-emerald-600"
+                    className="h-4 w-4 shrink-0 text-emerald-400"
                     strokeWidth={3}
                     aria-hidden="true"
                   />
