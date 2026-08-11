@@ -12,6 +12,7 @@ import {
   getProductAttributes,
   getSubcategoryBySlug,
   productMatchesQuery,
+  type Product,
 } from "@/lib/products";
 
 const SORT_OPTIONS = [
@@ -28,6 +29,27 @@ type SortValue = (typeof SORT_OPTIONS)[number]["value"];
 type FilterOption = { value: string; label: string };
 
 const PAGE_SIZE = 24;
+
+/**
+ * Availability, straight from the accounting system's stock figure: a positive
+ * quantity is in stock, zero is not. Both loaders normalise a missing figure to
+ * zero, so "no data" reads as out of stock rather than silently in stock.
+ */
+function isInStock(product: Product): boolean {
+  return typeof product.quantity === "number"
+    ? product.quantity > 0
+    : product.inStock === true;
+}
+
+/**
+ * Fixed, unlike the brand and characteristic groups: both boxes are always
+ * offered so the block does not appear and disappear as the customer narrows
+ * the category. Ticking both is the same as ticking neither.
+ */
+const AVAILABILITY_OPTIONS: FilterOption[] = [
+  { value: "in", label: "В наявності" },
+  { value: "out", label: "Немає в наявності" },
+];
 
 function uniqueSorted(values: string[]): string[] {
   return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b, "uk"));
@@ -124,6 +146,8 @@ export default function CatalogBrowser({
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
   /** Badge `field` names ("isPromo", "isBestseller") the customer ticked. */
   const [selectedBadges, setSelectedBadges] = useState<string[]>([]);
+  /** "in" / "out" — empty means no availability constraint. */
+  const [selectedAvailability, setSelectedAvailability] = useState<string[]>([]);
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [sort, setSort] = useState<SortValue>("default");
@@ -187,19 +211,41 @@ export default function CatalogBrowser({
    * in the admin panel becomes a filter automatically.
    */
   const attributeGroups = useMemo(() => {
-    const byLabel = new Map<string, Set<string>>();
+    // `count` is how many products in scope carry the characteristic at all —
+    // `getProductAttributes` returns one entry per label, so a product can
+    // only increment it once.
+    const byLabel = new Map<string, { values: Set<string>; count: number }>();
     for (const product of scopedProducts) {
       for (const [label, value] of getProductAttributes(product)) {
-        const bucket = byLabel.get(label) ?? new Set<string>();
-        bucket.add(value);
+        const bucket = byLabel.get(label) ?? { values: new Set<string>(), count: 0 };
+        bucket.values.add(value);
+        bucket.count += 1;
         byLabel.set(label, bucket);
       }
     }
-    return [...byLabel.entries()]
-      // A characteristic shared by every product filters nothing — hide it.
-      .filter(([, values]) => values.size > 1)
-      .sort(([a], [b]) => a.localeCompare(b, "uk"))
-      .map(([label, values]) => ({ label, options: toOptions([...values]) }));
+    const total = scopedProducts.length;
+    return (
+      [...byLabel.entries()]
+        /**
+         * Hide only a characteristic that genuinely cannot narrow anything:
+         * every product in scope has it *and* they all share one value.
+         *
+         * The previous rule dropped any characteristic with a single distinct
+         * value, which is the shape every characteristic has when it has just
+         * been filled in on one product — so a newly added characteristic was
+         * invisible in the catalogue until a second product got a different
+         * value for it. A characteristic on a handful of products is exactly
+         * what a shopper wants to filter by.
+         */
+        .filter(
+          ([, { values, count }]) => !(values.size === 1 && count === total),
+        )
+        .sort(([a], [b]) => a.localeCompare(b, "uk"))
+        .map(([label, { values }]) => ({
+          label,
+          options: toOptions([...values]),
+        }))
+    );
   }, [scopedProducts]);
 
   // Selected attribute values, keyed by characteristic label.
@@ -233,6 +279,14 @@ export default function CatalogBrowser({
       if (selectedBrands.length && !selectedBrands.includes(product.brand)) {
         return false;
       }
+      // Combines with every other filter rather than replacing them; ticking
+      // both boxes matches both keys, which is the same as ticking neither.
+      if (
+        selectedAvailability.length &&
+        !selectedAvailability.includes(isInStock(product) ? "in" : "out")
+      ) {
+        return false;
+      }
       // Ticking both means "акційні АБО топ продажів", which is what a shopper
       // scanning for deals expects — not the empty intersection of the two.
       if (
@@ -260,32 +314,43 @@ export default function CatalogBrowser({
       return true;
     });
 
-    // Stable within each group: flagged items float up, the rest keep the
-    // order they already had.
-    const badgeFirst = (field: "isPromo" | "isBestseller") =>
-      [...filtered].sort(
-        (a, b) => Number(b[field] === true) - Number(a[field] === true),
-      );
+    /** The customer's chosen order — applied only within an availability group. */
+    const secondary = (a: Product, b: Product): number => {
+      switch (sort) {
+        case "promo-first":
+          return Number(b.isPromo === true) - Number(a.isPromo === true);
+        case "bestseller-first":
+          return (
+            Number(b.isBestseller === true) - Number(a.isBestseller === true)
+          );
+        case "price-asc":
+          return a.price - b.price;
+        case "price-desc":
+          return b.price - a.price;
+        case "name-asc":
+          return a.name.localeCompare(b.name, "uk");
+        default:
+          return 0;
+      }
+    };
 
-    switch (sort) {
-      case "promo-first":
-        return badgeFirst("isPromo");
-      case "bestseller-first":
-        return badgeFirst("isBestseller");
-      case "price-asc":
-        return [...filtered].sort((a, b) => a.price - b.price);
-      case "price-desc":
-        return [...filtered].sort((a, b) => b.price - a.price);
-      case "name-asc":
-        return [...filtered].sort((a, b) => a.name.localeCompare(b.name, "uk"));
-      default:
-        return filtered;
-    }
+    /**
+     * Availability is the primary key for *every* sort mode, so something the
+     * shop cannot ship never outranks something it can — a cheap out-of-stock
+     * item stays below the available ones under "від дешевих до дорогих".
+     *
+     * `Array.prototype.sort` is stable, so "За замовчуванням" (secondary
+     * returns 0) keeps the catalogue's own order inside each group.
+     */
+    return [...filtered].sort(
+      (a, b) => Number(isInStock(b)) - Number(isInStock(a)) || secondary(a, b),
+    );
   }, [
     scopedProducts,
     selectedCategories,
     selectedBrands,
     selectedBadges,
+    selectedAvailability,
     selectedAttributes,
     minPrice,
     maxPrice,
@@ -296,6 +361,7 @@ export default function CatalogBrowser({
     selectedCategories.length +
     selectedBrands.length +
     selectedBadges.length +
+    selectedAvailability.length +
     Object.values(selectedAttributes).reduce(
       (sum, values) => sum + values.length,
       0,
@@ -307,6 +373,7 @@ export default function CatalogBrowser({
     setSelectedCategories([]);
     setSelectedBrands([]);
     setSelectedBadges([]);
+    setSelectedAvailability([]);
     setSelectedAttributes({});
     setMinPrice("");
     setMaxPrice("");
@@ -364,6 +431,15 @@ export default function CatalogBrowser({
           selected={selectedCategories}
           onToggle={(value) =>
             setSelectedCategories((prev) => toggleValue(prev, value))
+          }
+        />
+
+        <FilterGroup
+          legend="Наявність"
+          options={AVAILABILITY_OPTIONS}
+          selected={selectedAvailability}
+          onToggle={(value) =>
+            setSelectedAvailability((prev) => toggleValue(prev, value))
           }
         />
 
