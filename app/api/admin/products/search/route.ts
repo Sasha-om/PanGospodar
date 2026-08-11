@@ -46,11 +46,32 @@ export async function GET(request: Request) {
   const limit = Number(params.get("limit") ?? DEFAULT_LIMIT);
   const offset = Number(params.get("offset") ?? 0);
 
+  // Repeated params (?brand=STIHL&brand=Bosch). Values are matched against
+  // fixed sets or compared as bound parameters, never concatenated into SQL.
+  const list = (key: string) =>
+    params.getAll(key).map((value) => value.trim()).filter(Boolean);
+
+  const availabilityParam = params.get("availability");
+  const availability =
+    availabilityParam === "in" || availabilityParam === "out"
+      ? availabilityParam
+      : null;
+
+  const allowed = (key: string, valid: readonly string[]) =>
+    list(key).filter((value) => valid.includes(value));
+
   try {
     const result = await searchProductsForAdmin({
       query,
       limit: Number.isFinite(limit) ? limit : DEFAULT_LIMIT,
       offset: Number.isFinite(offset) ? offset : 0,
+      filters: {
+        brands: list("brand"),
+        categories: list("category"),
+        availability,
+        badges: allowed("badge", ["promo", "bestseller"]),
+        missing: allowed("missing", ["description", "attributes", "image"]),
+      },
     });
     return json({ success: true, ...result }, 200);
   } catch (caught) {

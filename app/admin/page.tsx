@@ -22,8 +22,15 @@ import ProductFormModal, {
   EMPTY_PRODUCT_FORM,
   toFormValues,
 } from "@/components/admin/ProductFormModal";
+import ProductFilters, {
+  EMPTY_FILTERS,
+  countActiveFilters,
+  filtersToParams,
+  type AdminFilterState,
+} from "@/components/admin/ProductFilters";
 import StoreSettingsForm from "@/components/admin/StoreSettingsForm";
 import { useProducts } from "@/context/ProductsContext";
+import type { AdminFacets } from "@/lib/db";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   categories,
@@ -64,6 +71,8 @@ export default function AdminPage() {
 
   const [activeSection, setActiveSection] = useState<SectionId>("products");
   const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState<AdminFilterState>(EMPTY_FILTERS);
+  const [facets, setFacets] = useState<AdminFacets | null>(null);
 
   // Modal state — only one is ever open at a time.
   const [editing, setEditing] = useState<Product | null>(null);
@@ -99,12 +108,41 @@ export default function AdminPage() {
   /** Bumped after a save/delete to force the list to reload. */
   const [refreshToken, setRefreshToken] = useState(0);
 
-  // Reset paging whenever the query changes.
-  const [syncedQuery, setSyncedQuery] = useState(debouncedQuery);
-  if (debouncedQuery !== syncedQuery) {
-    setSyncedQuery(debouncedQuery);
+  // Reset paging whenever the query or a filter changes — a narrower result set
+  // should start at the first page, not keep the previous "show more" depth.
+  const filterKey = JSON.stringify(filters);
+  const [syncedSearch, setSyncedSearch] = useState(`${debouncedQuery}|${filterKey}`);
+  if (`${debouncedQuery}|${filterKey}` !== syncedSearch) {
+    setSyncedSearch(`${debouncedQuery}|${filterKey}`);
     setPageSize(PAGE_SIZE);
   }
+
+  /**
+   * Filter counts, fetched once (and again after a save). Kept out of the
+   * search effect on purpose: search re-runs on every keystroke, while these
+   * totals only move when the catalog itself changes.
+   */
+  useEffect(() => {
+    if (!serverSearch) {
+      return;
+    }
+    const controller = new AbortController();
+    fetch("/api/admin/products/facets", {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = (await response.json()) as { facets: AdminFacets };
+        setFacets(data.facets);
+      })
+      .catch((caught: unknown) => {
+        if ((caught as Error)?.name !== "AbortError") {
+          console.error("[admin] Facets failed:", caught);
+        }
+      });
+    return () => controller.abort();
+  }, [serverSearch, refreshToken]);
 
   useEffect(() => {
     if (!serverSearch) {
@@ -120,6 +158,7 @@ export default function AdminPage() {
       q: debouncedQuery.trim(),
       limit: String(pageSize),
     });
+    filtersToParams(filters, params);
 
     fetch(`/api/admin/products/search?${params}`, {
       cache: "no-store",
@@ -140,8 +179,9 @@ export default function AdminPage() {
         };
         setRows(data.products);
         setTotal(data.total);
-        // Only an unfiltered result reflects the size of the whole catalog.
-        if (debouncedQuery.trim() === "") {
+        // Only a result with no query AND no filters reflects the size of the
+        // whole catalog — otherwise the stat card would follow the filters.
+        if (debouncedQuery.trim() === "" && countActiveFilters(filters) === 0) {
           setCatalogTotal(data.total);
         }
       })
@@ -159,7 +199,7 @@ export default function AdminPage() {
       });
 
     return () => controller.abort();
-  }, [debouncedQuery, pageSize, serverSearch, refreshToken]);
+  }, [debouncedQuery, pageSize, serverSearch, refreshToken, filters]);
 
   /** Client-side fallback used only when the database is unavailable. */
   const clientFiltered = useMemo(() => {
@@ -286,7 +326,22 @@ export default function AdminPage() {
                     : "Джерело даних недоступне — каталог порожній."}
               </div>
 
-              <div className="mt-4 rounded-xl border border-graphite-200 bg-white">
+              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">
+                {/* Filters only exist on the server-search path; without a
+                    database the list falls back to in-memory filtering and
+                    there are no facet counts to show. */}
+                {serverSearch ? (
+                  <div className="h-fit lg:sticky lg:top-4">
+                    <ProductFilters
+                      filters={filters}
+                      facets={facets}
+                      onChange={setFilters}
+                      onReset={() => setFilters(EMPTY_FILTERS)}
+                    />
+                  </div>
+                ) : null}
+
+                <div className="min-w-0 rounded-xl border border-graphite-200 bg-white">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-graphite-100 p-5">
                   <h2 className="text-lg font-bold text-graphite-950">
                     Каталог товарів
@@ -431,7 +486,9 @@ export default function AdminPage() {
                       ? "Пошук…"
                       : debouncedQuery.trim()
                         ? `За запитом «${debouncedQuery}» товарів не знайдено.`
-                        : "Каталог порожній. Додайте перший товар."}
+                        : countActiveFilters(filters) > 0
+                          ? "За обраними фільтрами товарів не знайдено."
+                          : "Каталог порожній. Додайте перший товар."}
                   </p>
                 ) : (
                   <div className="flex flex-wrap items-center justify-between gap-3 border-t border-graphite-100 p-4">
@@ -450,6 +507,7 @@ export default function AdminPage() {
                     ) : null}
                   </div>
                 )}
+                </div>
               </div>
             </section>
           ) : null}

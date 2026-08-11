@@ -11,8 +11,14 @@ export const LOCAL_PLACEHOLDER = "/placeholder-product.svg";
 
 export const KNOWN_SLUGS = new Set(categories.map((category) => category.slug));
 
-/** Common tool-market brands, recovered from the product name. */
-const KNOWN_BRANDS = [
+/**
+ * Common tool-market brands, recovered from the product name.
+ *
+ * Order is significant: the first entry found in the name wins, so a chain
+ * "Ланцюг Oregon для STIHL" reads as STIHL. The admin filter rebuilds the same
+ * precedence in SQL from this array, so the two can never disagree.
+ */
+export const KNOWN_BRANDS = [
   "STIHL",
   "Husqvarna",
   "Bosch",
@@ -46,7 +52,7 @@ const KNOWN_BRANDS = [
 ];
 
 /** A "manufacturer" column often holds a country of origin, not a brand. */
-const COUNTRY_VALUES = new Set([
+export const COUNTRY_VALUES = new Set([
   "польща",
   "австрія",
   "бразилія",
@@ -99,21 +105,47 @@ export function mapCategory(rawGroup: string): string {
  * column. Heuristic and best-effort; genuine parts, oils and accessories fall
  * through to "consumables", which is correct for them.
  */
+/**
+ * Ordered name patterns behind `inferCategory`, as data.
+ *
+ * Kept as plain alternation strings rather than inline regex literals so the
+ * admin catalog filter can rebuild the identical rules as Postgres `~*`
+ * expressions — the category column is empty for the whole catalog, so
+ * filtering has to reproduce this inference rather than read a stored value.
+ * Anything that matches nothing falls through to `consumables`.
+ */
+export const CATEGORY_RULES: { slug: string; pattern: string }[] = [
+  {
+    slug: "petrol-tools",
+    pattern: "бензопил|мотокос|бензокос|мотобур|мотоблок|бензо",
+  },
+  {
+    slug: "garden-equipment",
+    pattern:
+      "газонокос|аератор|культиватор|обприскувач|секатор|сучкорі|кущорі|тример|коса|садов|газон",
+  },
+  {
+    slug: "power-tools",
+    pattern:
+      "дриль|шурупов|перфоратор|болгарк|шліфув|лобзик|фрезер|електропил|стабіліз|зарядн|компресор|генератор|зварюв|степлер|електро|акумуляторн",
+  },
+  {
+    slug: "hand-tools",
+    pattern:
+      "ключ|викрут|молот|пасатиж|плоскогуб|рулетк|рівень|ножівк|стамеск|лещат|стрем|драбин",
+  },
+];
+
+export const CATEGORY_FALLBACK = "consumables";
+
 export function inferCategory(name: string): string {
   const n = name.toLowerCase();
-  if (/бензопил|мотокос|бензокос|мотобур|мотоблок|бензо/.test(n)) return "petrol-tools";
-  if (/газонокос|аератор|культиватор|обприскувач|секатор|сучкорі|кущорі|тример|коса|садов|газон/.test(n)) {
-    return "garden-equipment";
+  for (const rule of CATEGORY_RULES) {
+    if (new RegExp(rule.pattern).test(n)) {
+      return rule.slug;
+    }
   }
-  if (
-    /дриль|шурупов|перфоратор|болгарк|шліфув|лобзик|фрезер|електропил|стабіліз|зарядн|компресор|генератор|зварюв|степлер|електро|акумуляторн/.test(n)
-  ) {
-    return "power-tools";
-  }
-  if (/ключ|викрут|молот|пасатиж|плоскогуб|рулетк|рівень|ножівк|стамеск|лещат|стрем|драбин/.test(n)) {
-    return "hand-tools";
-  }
-  return "consumables";
+  return CATEGORY_FALLBACK;
 }
 
 export function resolveImage(rawImage: string): string {

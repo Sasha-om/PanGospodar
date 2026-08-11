@@ -24,6 +24,11 @@ import type {
 } from "@/lib/reviews";
 import type { Customer, CustomerWithSecret } from "@/lib/customers";
 import {
+  CATEGORY_FALLBACK,
+  CATEGORY_RULES,
+  COUNTRY_VALUES,
+  KNOWN_BRANDS,
+  KNOWN_SLUGS,
   LOCAL_PLACEHOLDER,
   detectBrand,
   inferCategory,
@@ -798,19 +803,24 @@ export async function searchProductsForAdmin({
   query,
   limit = 20,
   offset = 0,
+  filters = {},
 }: {
   query: string;
   limit?: number;
   offset?: number;
+  /** Sidebar filters. Combine with the query rather than replacing it. */
+  filters?: AdminProductFilters;
 }): Promise<AdminSearchResult> {
   const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 100);
   const safeOffset = Math.max(0, Math.floor(offset));
   const trimmed = query.trim();
+  const filtered = hasAdminFilters(filters);
 
   const run = async (): Promise<AdminSearchResult> => {
-    if (!trimmed) {
-      // No query: most recently touched products first.
+    if (!trimmed && !filtered) {
+      // Nothing selected: the cheap path, most recently touched first. Keeps
+      // the common case off the derived-column joins entirely.
       const rows = (await sql`
         SELECT * FROM products
         ORDER BY updated_at DESC NULLS LAST, name
@@ -825,7 +835,7 @@ export async function searchProductsForAdmin({
       };
     }
 
-    const pattern = `%${escapeLike(trimmed)}%`;
+    const pattern = trimmed ? `%${escapeLike(trimmed)}%` : null;
     // Digits-only variant so a scanned barcode with spaces/dashes still matches.
     const digits = trimmed.replace(/[^0-9]/g, "");
     const digitPattern = digits ? `%${digits}%` : null;
@@ -833,22 +843,28 @@ export async function searchProductsForAdmin({
     // A factory, not a shared value: each query gets its own fragment so the
     // two statements never share one lazy query object.
     const whereClause = () => sql`
-      name ILIKE ${pattern}
-      OR sku ILIKE ${pattern}
-      OR brand ILIKE ${pattern}
-      OR barcode ILIKE ${pattern}
-      OR (${digitPattern}::text IS NOT NULL
-          AND regexp_replace(COALESCE(barcode, ''), '[^0-9]', '', 'g') ILIKE ${digitPattern})
+      (
+        ${pattern}::text IS NULL
+        OR p.name ILIKE ${pattern}
+        OR p.sku ILIKE ${pattern}
+        OR p.brand ILIKE ${pattern}
+        OR p.barcode ILIKE ${pattern}
+        OR (${digitPattern}::text IS NOT NULL
+            AND regexp_replace(COALESCE(p.barcode, ''), '[^0-9]', '', 'g') ILIKE ${digitPattern})
+      )
+      AND ${filterClause(sql, filters)}
     `;
 
     const rows = (await sql`
-      SELECT * FROM products
+      SELECT * FROM ${derivedProducts(sql)}
       WHERE ${whereClause()}
-      ORDER BY updated_at DESC NULLS LAST, name
+      ORDER BY p.updated_at DESC NULLS LAST, p.name
       LIMIT ${safeLimit} OFFSET ${safeOffset}
     `) as ProductRow[];
     const countRows = (await sql`
-      SELECT COUNT(*)::int AS total FROM products WHERE ${whereClause()}
+      SELECT COUNT(*)::int AS total
+      FROM ${derivedProducts(sql)}
+      WHERE ${whereClause()}
     `) as { total: number }[];
 
     return {
@@ -1748,4 +1764,219 @@ export async function saveGeneratedContent(
         updated_at  = now()
     WHERE sku = ${sku}
   `;
+}
+
+/* --------------------- admin catalog filters (derived) -------------------- */
+
+/**
+ * Brand and category are not reliably stored: the catalogue's `category`
+ * column is empty for every row and most `brand` values are recovered from the
+ * product name at read time by `rowToProduct`. Filtering on the raw columns
+ * would therefore match almost nothing, so the same inference is rebuilt here
+ * in SQL and the admin filters run against *that*.
+ *
+ * Both expressions are built from the very constants `detectBrand` and
+ * `inferCategory` use, passed as parameters — the array order carries the
+ * precedence, so the two implementations cannot drift apart.
+ */
+function derivedProducts(sql: ReturnType<typeof getSql>) {
+  const brands = [...KNOWN_BRANDS];
+  const countries = [...COUNTRY_VALUES];
+  const slugs = CATEGORY_RULES.map((rule) => rule.slug);
+  const patterns = CATEGORY_RULES.map((rule) => rule.pattern);
+  const knownSlugs = [...KNOWN_SLUGS];
+
+  return sql`(
+    SELECT
+      p.*,
+      -- detectBrand(): an explicit brand wins unless it is really a country;
+      -- otherwise the first KNOWN_BRANDS entry appearing in the name.
+      CASE
+        WHEN COALESCE(p.brand, '') <> ''
+             AND lower(p.brand) <> ALL (${countries}::text[])
+        THEN p.brand
+        ELSE COALESCE(eb.brand, '')
+      END AS eff_brand,
+      -- safeCategorySlug(stored || inferCategory()).
+      CASE
+        WHEN COALESCE(p.category, '') <> '' THEN
+          CASE WHEN p.category = ANY (${knownSlugs}::text[])
+               THEN p.category ELSE ${CATEGORY_FALLBACK} END
+        ELSE COALESCE(ec.slug, ${CATEGORY_FALLBACK})
+      END AS eff_category
+    FROM products p
+    -- WITH ORDINALITY + ORDER BY ord reproduces Array.prototype.find():
+    -- the earliest entry in the constant array wins, so "Ланцюг Oregon для
+    -- STIHL" reads as STIHL in the filter exactly as it does on the site.
+    LEFT JOIN LATERAL (
+      SELECT b.brand
+      FROM unnest(${brands}::text[]) WITH ORDINALITY AS b(brand, ord)
+      WHERE p.name ILIKE '%' || b.brand || '%'
+      ORDER BY b.ord
+      LIMIT 1
+    ) eb ON true
+    LEFT JOIN LATERAL (
+      SELECT c.slug
+      FROM unnest(${slugs}::text[], ${patterns}::text[])
+           WITH ORDINALITY AS c(slug, pattern, ord)
+      WHERE p.name ~* c.pattern
+      ORDER BY c.ord
+      LIMIT 1
+    ) ec ON true
+  ) p`;
+}
+
+export interface AdminProductFilters {
+  /** Effective brand, as shown in the catalogue. */
+  brands?: string[];
+  /** Effective category slug. */
+  categories?: string[];
+  /** `"in"` = stock > 0, `"out"` = stock 0 or unset. */
+  availability?: "in" | "out" | null;
+  /** `"promo"` / `"bestseller"` — OR-ed, like the storefront badge filter. */
+  badges?: string[];
+  /** `"description"` / `"attributes"` / `"image"` — OR-ed. */
+  missing?: string[];
+}
+
+/** `null` for an empty selection, so the SQL treats it as "no constraint". */
+function orNull(values: string[] | undefined): string[] | null {
+  const clean = (values ?? []).map((v) => v.trim()).filter(Boolean);
+  return clean.length > 0 ? clean : null;
+}
+
+/** Are any filters actually set? Used to pick the cheap unfiltered path. */
+export function hasAdminFilters(filters: AdminProductFilters): boolean {
+  return Boolean(
+    orNull(filters.brands) ||
+      orNull(filters.categories) ||
+      orNull(filters.badges) ||
+      orNull(filters.missing) ||
+      (filters.availability === "in" || filters.availability === "out"),
+  );
+}
+
+/**
+ * One WHERE fragment covering every filter.
+ *
+ * Each clause short-circuits on a NULL parameter, so an unset filter costs
+ * nothing and there is no string concatenation anywhere — every value is a
+ * bound parameter.
+ */
+function filterClause(
+  sql: ReturnType<typeof getSql>,
+  filters: AdminProductFilters,
+) {
+  const brands = orNull(filters.brands);
+  const categories = orNull(filters.categories);
+  const badges = orNull(filters.badges);
+  const missing = orNull(filters.missing);
+  const availability =
+    filters.availability === "in" || filters.availability === "out"
+      ? filters.availability
+      : null;
+
+  return sql`
+    (${brands}::text[] IS NULL OR p.eff_brand = ANY (${brands}::text[]))
+    AND (${categories}::text[] IS NULL OR p.eff_category = ANY (${categories}::text[]))
+    AND (
+      ${availability}::text IS NULL
+      OR (${availability}::text = 'in'  AND COALESCE(p.stock, 0) >  0)
+      OR (${availability}::text = 'out' AND COALESCE(p.stock, 0) <= 0)
+    )
+    AND (
+      ${badges}::text[] IS NULL
+      OR ('promo'      = ANY (${badges}::text[]) AND p.is_promo      IS TRUE)
+      OR ('bestseller' = ANY (${badges}::text[]) AND p.is_bestseller IS TRUE)
+    )
+    AND (
+      ${missing}::text[] IS NULL
+      OR ('description' = ANY (${missing}::text[])
+          AND COALESCE(p.description, '') = '')
+      OR ('attributes'  = ANY (${missing}::text[])
+          AND COALESCE(p.attributes, '{}'::jsonb) = '{}'::jsonb)
+      OR ('image'       = ANY (${missing}::text[])
+          AND COALESCE(p.image_url, '') IN ('', ${LOCAL_PLACEHOLDER}))
+    )
+  `;
+}
+
+export interface AdminFacet {
+  value: string;
+  count: number;
+}
+
+export interface AdminFacets {
+  brands: AdminFacet[];
+  categories: AdminFacet[];
+  availability: { in: number; out: number };
+  missing: { description: number; attributes: number; image: number };
+}
+
+/**
+ * Counts for the admin filter sidebar, so it only ever offers values that
+ * actually match something and can show how many.
+ *
+ * Deliberately a separate endpoint from the search: the search re-runs on
+ * every keystroke, while these totals only change after an edit or import.
+ */
+export async function loadAdminFacets(): Promise<AdminFacets> {
+  const sql = getSql();
+
+  const run = async (): Promise<AdminFacets> => {
+    const [brandRows, categoryRows, totalRows] = await Promise.all([
+      sql`
+        SELECT p.eff_brand AS value, COUNT(*)::int AS count
+        FROM ${derivedProducts(sql)}
+        WHERE p.eff_brand <> ''
+        GROUP BY p.eff_brand
+        ORDER BY count DESC, value
+      `,
+      sql`
+        SELECT p.eff_category AS value, COUNT(*)::int AS count
+        FROM ${derivedProducts(sql)}
+        GROUP BY p.eff_category
+        ORDER BY count DESC, value
+      `,
+      sql`
+        SELECT
+          COUNT(*) FILTER (WHERE COALESCE(stock, 0) >  0)::int AS in_stock,
+          COUNT(*) FILTER (WHERE COALESCE(stock, 0) <= 0)::int AS out_stock,
+          COUNT(*) FILTER (WHERE COALESCE(description, '') = '')::int AS no_description,
+          COUNT(*) FILTER (WHERE COALESCE(attributes, '{}'::jsonb) = '{}'::jsonb)::int AS no_attributes,
+          COUNT(*) FILTER (WHERE COALESCE(image_url, '') IN ('', ${LOCAL_PLACEHOLDER}))::int AS no_image
+        FROM products
+      `,
+    ]);
+
+    const brands = brandRows as AdminFacet[];
+    const categories = categoryRows as AdminFacet[];
+    const t = (
+      totalRows as {
+        in_stock: number;
+        out_stock: number;
+        no_description: number;
+        no_attributes: number;
+        no_image: number;
+      }[]
+    )[0];
+    return {
+      brands,
+      categories,
+      availability: { in: t?.in_stock ?? 0, out: t?.out_stock ?? 0 },
+      missing: {
+        description: t?.no_description ?? 0,
+        attributes: t?.no_attributes ?? 0,
+        image: t?.no_image ?? 0,
+      },
+    };
+  };
+
+  try {
+    return await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureProductsTable();
+    return run();
+  }
 }
