@@ -44,8 +44,10 @@ export default function Home() {
         <div className="absolute inset-0 -z-10 bg-graphite-950">
           {/*
             The hero is far wider than the photo, so `cover` crops vertically.
-            Biasing the crop upward keeps the STIHL sign and the entrance in
-            frame and drops the empty pavement instead.
+            Biasing the crop upward keeps the whole STIHL / ПАН ГОСПОДАР sign
+            and the entrance in frame and drops the empty pavement instead.
+            20% was picked by rendering the actual crop: at 25% and above the
+            top edge of the sign starts to clip.
           */}
           <Image
             src="/store-front.jpg"
@@ -53,7 +55,7 @@ export default function Home() {
             fill
             priority
             sizes="100vw"
-            className="object-cover object-[center_25%]"
+            className="object-cover object-[center_20%]"
           />
           {/*
             Two scrims. The horizontal one is heavy on the left, where the copy
