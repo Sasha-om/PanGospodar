@@ -6,6 +6,7 @@ import {
   Inbox,
   Loader2,
   LogOut,
+  MessageSquare,
   Package,
   Pencil,
   Plus,
@@ -36,6 +37,7 @@ const PAGE_SIZE = 20;
 const SECTIONS = [
   { id: "products", label: "Товари", icon: Package },
   { id: "orders", label: "Замовлення", icon: ShoppingCart },
+  { id: "reviews", label: "Відгуки", icon: MessageSquare },
   { id: "settings", label: "Налаштування", icon: Settings },
 ] as const;
 
@@ -474,6 +476,31 @@ export default function AdminPage() {
                   className="mt-4 rounded-lg bg-accent-500 px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent-600"
                 >
                   Переглянути замовлення
+                </Link>
+              </div>
+            </section>
+          ) : null}
+
+          {activeSection === "reviews" ? (
+            <section className="rounded-xl border border-graphite-200 bg-white">
+              <div className="border-b border-graphite-100 p-5">
+                <h2 className="text-lg font-bold text-graphite-950">Відгуки</h2>
+              </div>
+              <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-graphite-50 text-graphite-400">
+                  <MessageSquare className="h-8 w-8" aria-hidden="true" />
+                </span>
+                <h3 className="mt-4 text-base font-bold text-graphite-950">
+                  Модерація відгуків на окремій сторінці
+                </h3>
+                <p className="mt-1 max-w-xs text-sm text-graphite-500">
+                  Відгук з&apos;являється на сайті лише після підтвердження.
+                </p>
+                <Link
+                  href="/admin/reviews"
+                  className="mt-4 rounded-lg bg-accent-500 px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent-600"
+                >
+                  Переглянути відгуки
                 </Link>
               </div>
             </section>

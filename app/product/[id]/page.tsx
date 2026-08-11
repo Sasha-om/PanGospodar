@@ -4,6 +4,8 @@ import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import CompareButton from "@/components/CompareButton";
 import ProductOrderActions from "@/components/product/ProductOrderActions";
+import ProductReviews from "@/components/product/ProductReviews";
+import StarRating from "@/components/StarRating";
 import ProductCarousel from "@/components/ProductCarousel";
 import { loadProducts } from "@/lib/catalog";
 import { findCoPurchasedSkus } from "@/lib/db";
@@ -104,6 +106,17 @@ export default async function ProductPage({
               <h1 className="mt-1 text-3xl font-extrabold leading-tight text-stone-800 sm:text-4xl">
                 {product.name}
               </h1>
+              {typeof product.rating === "number" ? (
+                <a
+                  href="#reviews"
+                  className="mt-2 inline-flex w-fit transition-opacity hover:opacity-80"
+                >
+                  <StarRating
+                    rating={product.rating}
+                    reviewCount={product.reviewCount}
+                  />
+                </a>
+              ) : null}
               {product.shortDescription ? (
                 <p className="mt-3 text-base text-stone-600">
                   {product.shortDescription}
@@ -197,6 +210,11 @@ export default async function ProductPage({
             ) : null}
           </div>
         </div>
+
+        <ProductReviews
+          productId={product.id}
+          productSku={product.sku ?? product.id}
+        />
 
         <ProductCarousel
           title="Схожі товари"

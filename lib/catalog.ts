@@ -1,6 +1,12 @@
 import type { Product } from "@/lib/products";
-import { getConnectionSource, hasDatabase, loadProductsFromDb } from "@/lib/db";
+import {
+  getConnectionSource,
+  hasDatabase,
+  loadProductsFromDb,
+  loadReviewStats,
+} from "@/lib/db";
 import { loadProductsFromFile } from "@/lib/ukrsklad";
+import type { ReviewStats } from "@/lib/reviews";
 
 /**
  * Single entry point for reading the catalog.
@@ -31,6 +37,32 @@ export interface LoadProductsResult {
   };
 }
 
+/**
+ * Attach the average rating and review count to the products that have them.
+ *
+ * Products without approved reviews are returned untouched, so `rating` stays
+ * absent and the card hides its star block rather than showing a hollow zero.
+ */
+function withRatings(
+  products: Product[],
+  stats: Map<string, ReviewStats>,
+): Product[] {
+  if (stats.size === 0) {
+    return products;
+  }
+  return products.map((product) => {
+    const entry = stats.get(product.sku ?? product.id);
+    if (!entry || entry.count === 0) {
+      return product;
+    }
+    return {
+      ...product,
+      rating: entry.average,
+      reviewCount: entry.count,
+    };
+  });
+}
+
 export async function loadProducts(): Promise<LoadProductsResult> {
   const loadedAt = new Date().toISOString();
   const databaseConfigured = hasDatabase();
@@ -39,12 +71,18 @@ export async function loadProducts(): Promise<LoadProductsResult> {
 
   if (databaseConfigured) {
     try {
-      const products = await loadProductsFromDb();
+      // Ratings come from approved reviews, so they are read alongside the
+      // catalog rather than stored on the product row. `loadReviewStats`
+      // never throws — a product simply carries no rating.
+      const [products, reviewStats] = await Promise.all([
+        loadProductsFromDb(),
+        loadReviewStats(),
+      ]);
       console.info(
         `[catalog] Loaded ${products.length} products from Postgres (via ${connectionSource})`,
       );
       return {
-        products,
+        products: withRatings(products, reviewStats),
         source: "database",
         loadedAt,
         diagnostics: { databaseConfigured, connectionSource },

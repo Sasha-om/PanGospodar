@@ -16,6 +16,12 @@ import {
   type OrderType,
   type StockShortage,
 } from "@/lib/orders";
+import type {
+  Review,
+  ReviewInput,
+  ReviewStats,
+  ReviewStatus,
+} from "@/lib/reviews";
 import {
   LOCAL_PLACEHOLDER,
   detectBrand,
@@ -1076,4 +1082,251 @@ export async function saveStoreSettings(values: StoreSettings): Promise<void> {
     await ensureSettingsTable();
     await run();
   }
+}
+
+/* ------------------------------- reviews -------------------------------- */
+
+/** Create the `reviews` table if it does not exist. Idempotent. */
+export async function ensureReviewsTable(): Promise<void> {
+  const sql = getSql();
+  await sql`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id          serial PRIMARY KEY,
+      product_sku text NOT NULL,
+      author_name text NOT NULL,
+      rating      smallint NOT NULL,
+      body        text NOT NULL,
+      status      text NOT NULL DEFAULT 'PENDING',
+      ip_hash     text NOT NULL DEFAULT '',
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT reviews_rating_range CHECK (rating BETWEEN 1 AND 5)
+    )
+  `;
+  // The product page reads approved reviews for one SKU, newest first.
+  await sql`
+    CREATE INDEX IF NOT EXISTS reviews_sku_status_idx
+    ON reviews (product_sku, status, created_at DESC)
+  `;
+  // The moderation queue reads by status.
+  await sql`
+    CREATE INDEX IF NOT EXISTS reviews_status_created_idx
+    ON reviews (status, created_at DESC)
+  `;
+  // Both rate-limit probes scan by author IP within a time window.
+  await sql`
+    CREATE INDEX IF NOT EXISTS reviews_ip_created_idx
+    ON reviews (ip_hash, created_at DESC)
+  `;
+}
+
+let reviewsSchemaReady: Promise<void> | null = null;
+
+/** Memoized per process — the DDL is idempotent but costs round trips. */
+export function ensureReviewsSchema(): Promise<void> {
+  reviewsSchemaReady ??= ensureReviewsTable().catch((error: unknown) => {
+    reviewsSchemaReady = null;
+    throw error;
+  });
+  return reviewsSchemaReady;
+}
+
+interface ReviewRow {
+  id: number;
+  product_sku: string;
+  author_name: string;
+  rating: number;
+  body: string;
+  status: string;
+  ip_hash: string | null;
+  created_at: string | Date;
+  product_name?: string | null;
+}
+
+function rowToReview(row: ReviewRow): Review {
+  return {
+    id: row.id,
+    productSku: row.product_sku,
+    authorName: row.author_name ?? "",
+    rating: toNumber(row.rating),
+    body: row.body ?? "",
+    status: (row.status as ReviewStatus) ?? "PENDING",
+    ipHash: row.ip_hash ?? "",
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+    productName: row.product_name ?? undefined,
+  };
+}
+
+/**
+ * How many reviews this visitor posted recently.
+ *
+ * Counts every status: a rejected review still used the quota, otherwise a
+ * spammer would get unlimited retries by having their posts thrown out.
+ */
+export async function countRecentReviewsByIp(
+  ipHash: string,
+  withinHours: number,
+): Promise<number> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+    FROM reviews
+    WHERE ip_hash = ${ipHash}
+      AND ip_hash <> ''
+      AND created_at > now() - make_interval(hours => ${withinHours})
+  `) as { n: number }[];
+  return rows[0]?.n ?? 0;
+}
+
+/** Has this visitor already reviewed this product inside the window? */
+export async function hasRecentReviewForProduct(
+  ipHash: string,
+  productSku: string,
+  withinHours: number,
+): Promise<boolean> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT 1
+    FROM reviews
+    WHERE ip_hash = ${ipHash}
+      AND ip_hash <> ''
+      AND product_sku = ${productSku}
+      AND created_at > now() - make_interval(hours => ${withinHours})
+    LIMIT 1
+  `) as unknown[];
+  return rows.length > 0;
+}
+
+/** Store a new review. Always lands in `PENDING`. */
+export async function createReview(input: ReviewInput): Promise<Review> {
+  const sql = getSql();
+  const run = async () =>
+    (await sql`
+      INSERT INTO reviews (product_sku, author_name, rating, body, status, ip_hash)
+      VALUES (
+        ${input.productSku},
+        ${input.authorName},
+        ${input.rating},
+        ${input.body},
+        'PENDING',
+        ${input.ipHash}
+      )
+      RETURNING *
+    `) as ReviewRow[];
+
+  try {
+    return rowToReview((await run())[0]);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureReviewsTable();
+    return rowToReview((await run())[0]);
+  }
+}
+
+/** Approved reviews for one product, newest first. */
+export async function listApprovedReviews(
+  productSku: string,
+  limit = 50,
+): Promise<Review[]> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
+  try {
+    const rows = (await sql`
+      SELECT * FROM reviews
+      WHERE product_sku = ${productSku} AND status = 'APPROVED'
+      ORDER BY created_at DESC
+      LIMIT ${safeLimit}
+    `) as ReviewRow[];
+    return rows.map(rowToReview);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    // No table yet simply means no reviews.
+    return [];
+  }
+}
+
+/**
+ * The moderation queue. Joins the product name so the admin can tell what is
+ * being reviewed without looking the SKU up.
+ */
+export async function listReviews(limit = 200): Promise<Review[]> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 500);
+  try {
+    const rows = (await sql`
+      SELECT r.*, p.name AS product_name
+      FROM reviews r
+      LEFT JOIN products p ON p.sku = r.product_sku
+      ORDER BY r.created_at DESC
+      LIMIT ${safeLimit}
+    `) as ReviewRow[];
+    return rows.map(rowToReview);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureReviewsTable();
+    return [];
+  }
+}
+
+export class ReviewNotFoundError extends Error {
+  constructor(id: number) {
+    super(`Review ${id} not found`);
+    this.name = "ReviewNotFoundError";
+  }
+}
+
+export async function setReviewStatus(
+  id: number,
+  status: ReviewStatus,
+): Promise<Review> {
+  const sql = getSql();
+  const rows = (await sql`
+    UPDATE reviews SET status = ${status} WHERE id = ${id} RETURNING *
+  `) as ReviewRow[];
+  if (rows.length === 0) {
+    throw new ReviewNotFoundError(id);
+  }
+  return rowToReview(rows[0]);
+}
+
+export async function deleteReview(id: number): Promise<void> {
+  const sql = getSql();
+  await sql`DELETE FROM reviews WHERE id = ${id}`;
+}
+
+/**
+ * Average rating and count per SKU, approved reviews only.
+ *
+ * Returns an empty map instead of throwing: a catalog page must still render
+ * when the reviews table has not been created yet.
+ */
+export async function loadReviewStats(): Promise<Map<string, ReviewStats>> {
+  const stats = new Map<string, ReviewStats>();
+  try {
+    const sql = getSql();
+    const rows = (await sql`
+      SELECT product_sku, avg(rating)::float8 AS average, count(*)::int AS count
+      FROM reviews
+      WHERE status = 'APPROVED'
+      GROUP BY product_sku
+    `) as { product_sku: string; average: number; count: number }[];
+
+    for (const row of rows) {
+      stats.set(row.product_sku, {
+        average: toNumber(row.average),
+        count: row.count,
+      });
+    }
+  } catch (caught) {
+    // No `reviews` table yet is the normal state of a fresh install, not a
+    // fault — staying quiet keeps it from logging on every catalog read until
+    // the first review is submitted.
+    if (!isMissingSchemaError(caught)) {
+      const detail = caught instanceof Error ? caught.message : String(caught);
+      console.warn(`[reviews] Stats unavailable, rendering without them: ${detail}`);
+    }
+  }
+  return stats;
 }
