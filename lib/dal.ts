@@ -13,7 +13,9 @@ import type { SessionPayload } from "@/lib/auth-token";
  */
 export const verifySession = cache(async (): Promise<SessionPayload> => {
   const session = await getSession();
-  if (!session) {
+  // The role is checked, not just the signature: customer sessions are signed
+  // with the same secret, so a valid token alone must never imply admin.
+  if (!session || session.role !== "admin") {
     redirect("/login");
   }
   return session;

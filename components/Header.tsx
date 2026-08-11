@@ -1,14 +1,16 @@
 import Link from "next/link";
 import { Suspense } from "react";
-import { Clock, Phone } from "lucide-react";
+import { Clock, Phone, User } from "lucide-react";
 import CartBadge from "@/components/CartBadge";
 import CategoryNav, { CategoryNavFallback } from "@/components/CategoryNav";
 import SearchBar from "@/components/SearchBar";
+import { getCustomerId } from "@/lib/customer-session";
 import { getStoreSettings } from "@/lib/db";
 import { hourSegments, telHref } from "@/lib/store-settings";
 
 export default async function Header() {
   const settings = await getStoreSettings();
+  const signedIn = (await getCustomerId()) !== null;
   // The top bar is tight, so only the first line of the schedule fits.
   const primaryHours = hourSegments(settings.hours)[0] ?? settings.hours;
 
@@ -55,6 +57,18 @@ export default async function Header() {
           <Suspense fallback={<div className="flex-1" />}>
             <SearchBar />
           </Suspense>
+
+          <Link
+            href={signedIn ? "/account" : "/account/login"}
+            aria-label={signedIn ? "Особистий кабінет" : "Вхід в кабінет"}
+            title={signedIn ? "Особистий кабінет" : "Вхід в кабінет"}
+            className="flex shrink-0 items-center gap-2 rounded-sm border border-stone-200 px-3 py-2 text-sm font-semibold text-stone-700 transition-colors hover:border-accent-500 hover:text-accent-600"
+          >
+            <User className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">
+              {signedIn ? "Кабінет" : "Увійти"}
+            </span>
+          </Link>
 
           <CartBadge />
         </div>

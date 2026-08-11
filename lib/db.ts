@@ -22,6 +22,7 @@ import type {
   ReviewStats,
   ReviewStatus,
 } from "@/lib/reviews";
+import type { Customer, CustomerWithSecret } from "@/lib/customers";
 import {
   LOCAL_PLACEHOLDER,
   detectBrand,
@@ -1329,4 +1330,315 @@ export async function loadReviewStats(): Promise<Map<string, ReviewStats>> {
     }
   }
   return stats;
+}
+
+/* ------------------------------ customers -------------------------------- */
+
+/** Create the `customers` and `favorites` tables if absent. Idempotent. */
+export async function ensureCustomersTable(): Promise<void> {
+  const sql = getSql();
+  await sql`
+    CREATE TABLE IF NOT EXISTS customers (
+      id            serial PRIMARY KEY,
+      email         text NOT NULL,
+      password_hash text NOT NULL,
+      name          text NOT NULL DEFAULT '',
+      phone         text NOT NULL DEFAULT '',
+      created_at    timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  // Email is the login, so uniqueness is enforced by the database rather than
+  // by a read-then-write in the action, which two concurrent signups could race.
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS customers_email_key ON customers (lower(email))
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS favorites (
+      customer_id integer NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      product_sku text NOT NULL,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (customer_id, product_sku)
+    )
+  `;
+  // Orders placed while signed in are owned outright; older ones are matched
+  // by phone/email at read time (see `listOrdersForCustomer`).
+  await sql`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id integer
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS orders_customer_idx ON orders (customer_id)
+  `;
+}
+
+let customersSchemaReady: Promise<void> | null = null;
+
+/** Memoized per process; the DDL is idempotent but costs round trips. */
+export function ensureCustomersSchema(): Promise<void> {
+  customersSchemaReady ??= (async () => {
+    await ensureOrdersTable();
+    await ensureCustomersTable();
+  })().catch((error: unknown) => {
+    customersSchemaReady = null;
+    throw error;
+  });
+  return customersSchemaReady;
+}
+
+interface CustomerRow {
+  id: number;
+  email: string;
+  password_hash: string;
+  name: string | null;
+  phone: string | null;
+  created_at: string | Date;
+}
+
+function rowToCustomer(row: CustomerRow): CustomerWithSecret {
+  return {
+    id: row.id,
+    email: row.email ?? "",
+    passwordHash: row.password_hash ?? "",
+    name: row.name ?? "",
+    phone: row.phone ?? "",
+    createdAt:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+  };
+}
+
+/** Raised when a signup collides with the unique email index. */
+export class EmailTakenError extends Error {
+  constructor() {
+    super("Email already registered");
+    this.name = "EmailTakenError";
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  const detail = error as { code?: string } | null;
+  if (detail?.code === "23505") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate key|customers_email_key|unique constraint/i.test(message);
+}
+
+export async function createCustomer(input: {
+  email: string;
+  passwordHash: string;
+  name: string;
+  phone: string;
+}): Promise<CustomerWithSecret> {
+  const sql = getSql();
+  const run = async () =>
+    (await sql`
+      INSERT INTO customers (email, password_hash, name, phone)
+      VALUES (${input.email}, ${input.passwordHash}, ${input.name}, ${input.phone})
+      RETURNING *
+    `) as CustomerRow[];
+
+  try {
+    return rowToCustomer((await run())[0]);
+  } catch (caught) {
+    if (isUniqueViolation(caught)) throw new EmailTakenError();
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    try {
+      return rowToCustomer((await run())[0]);
+    } catch (retry) {
+      if (isUniqueViolation(retry)) throw new EmailTakenError();
+      throw retry;
+    }
+  }
+}
+
+export async function findCustomerByEmail(
+  email: string,
+): Promise<CustomerWithSecret | null> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT * FROM customers WHERE lower(email) = lower(${email}) LIMIT 1
+    `) as CustomerRow[];
+    return rows.length > 0 ? rowToCustomer(rows[0]) : null;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    return null;
+  }
+}
+
+export async function findCustomerById(id: number): Promise<Customer | null> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT * FROM customers WHERE id = ${id} LIMIT 1
+    `) as CustomerRow[];
+    if (rows.length === 0) return null;
+    const full = rowToCustomer(rows[0]);
+    // The hash never leaves this module for a read-only lookup.
+    return {
+      id: full.id,
+      email: full.email,
+      name: full.name,
+      phone: full.phone,
+      createdAt: full.createdAt,
+    };
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    return null;
+  }
+}
+
+/** Keep the profile in step with what the customer types at checkout. */
+export async function updateCustomerContact(
+  id: number,
+  name: string,
+  phone: string,
+): Promise<void> {
+  const sql = getSql();
+  try {
+    await sql`
+      UPDATE customers
+      SET name  = COALESCE(NULLIF(${name}, ''), name),
+          phone = COALESCE(NULLIF(${phone}, ''), phone)
+      WHERE id = ${id}
+    `;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+  }
+}
+
+/* ------------------------------ favorites -------------------------------- */
+
+export async function listFavorites(customerId: number): Promise<string[]> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT product_sku FROM favorites
+      WHERE customer_id = ${customerId}
+      ORDER BY created_at DESC
+    `) as { product_sku: string }[];
+    return rows.map((row) => row.product_sku);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    return [];
+  }
+}
+
+export async function addFavorite(
+  customerId: number,
+  productSku: string,
+): Promise<void> {
+  const sql = getSql();
+  const run = async () => {
+    await sql`
+      INSERT INTO favorites (customer_id, product_sku)
+      VALUES (${customerId}, ${productSku})
+      ON CONFLICT (customer_id, product_sku) DO NOTHING
+    `;
+  };
+  try {
+    await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    await run();
+  }
+}
+
+export async function removeFavorite(
+  customerId: number,
+  productSku: string,
+): Promise<void> {
+  const sql = getSql();
+  try {
+    await sql`
+      DELETE FROM favorites
+      WHERE customer_id = ${customerId} AND product_sku = ${productSku}
+    `;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+  }
+}
+
+/**
+ * Merge a guest's locally-stored favourites into the account, in one statement.
+ *
+ * Runs on every sign-in, so it must be idempotent — `ON CONFLICT DO NOTHING`
+ * makes re-merging the same list a no-op rather than an error.
+ */
+export async function mergeFavorites(
+  customerId: number,
+  skus: string[],
+): Promise<void> {
+  const unique = [...new Set(skus.filter((sku) => sku.trim()))];
+  if (unique.length === 0) return;
+
+  const sql = getSql();
+  const run = async () => {
+    await sql`
+      INSERT INTO favorites (customer_id, product_sku)
+      SELECT ${customerId}, sku FROM UNNEST(${unique}::text[]) AS t(sku)
+      ON CONFLICT (customer_id, product_sku) DO NOTHING
+    `;
+  };
+  try {
+    await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    await run();
+  }
+}
+
+/* -------------------------- orders for a customer ------------------------- */
+
+/**
+ * A customer's order history.
+ *
+ * Matches three ways so history is not empty on day one: orders placed while
+ * signed in (`customer_id`), plus older guest orders whose email or phone match
+ * the account. Email is the reliable key — it is the verified login; the phone
+ * match is a convenience, and both are exact comparisons on normalized values.
+ */
+export async function listOrdersForCustomer(
+  customerId: number,
+  email: string,
+  phone: string,
+  limit = 100,
+): Promise<Order[]> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
+  try {
+    const rows = (await sql`
+      SELECT * FROM orders
+      WHERE customer_id = ${customerId}
+         OR (${email} <> '' AND lower(email) = lower(${email}))
+         OR (${phone} <> '' AND phone = ${phone})
+      ORDER BY created_at DESC
+      LIMIT ${safeLimit}
+    `) as OrderRow[];
+    return rows.map(rowToOrder);
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersSchema();
+    return [];
+  }
+}
+
+/** Stamp an order with its owner, so it stays linked if contacts change. */
+export async function claimOrderForCustomer(
+  orderId: number,
+  customerId: number,
+): Promise<void> {
+  const sql = getSql();
+  try {
+    await sql`
+      UPDATE orders SET customer_id = ${customerId}
+      WHERE id = ${orderId} AND customer_id IS NULL
+    `;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+  }
 }

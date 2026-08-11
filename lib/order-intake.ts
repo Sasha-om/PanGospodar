@@ -8,7 +8,15 @@
  */
 
 import { loadProducts } from "@/lib/catalog";
-import { createOrder, ensureStockSchema, hasDatabase } from "@/lib/db";
+import { getCustomerId } from "@/lib/customer-session";
+import {
+  claimOrderForCustomer,
+  createOrder,
+  ensureCustomersSchema,
+  ensureStockSchema,
+  hasDatabase,
+  updateCustomerContact,
+} from "@/lib/db";
 import { notifyNewOrder } from "@/lib/notifications";
 import {
   InsufficientStockError,
@@ -115,6 +123,22 @@ export async function saveAndNotify(
     // Also installs the stock guard the deduction relies on.
     await ensureStockSchema();
     const order = await createOrder(input);
+
+    // Attach the order to the account when one is signed in, so it stays in
+    // the customer's history even if they later change email or phone. Never
+    // allowed to fail the checkout — the order is already committed.
+    try {
+      const customerId = await getCustomerId();
+      if (customerId) {
+        await ensureCustomersSchema();
+        await claimOrderForCustomer(order.id, customerId);
+        await updateCustomerContact(customerId, input.firstName, input.phone);
+      }
+    } catch (linkError) {
+      const detail =
+        linkError instanceof Error ? linkError.message : String(linkError);
+      console.error(`[${logTag}] Order #${order.id} saved but not linked: ${detail}`);
+    }
 
     const results = await notifyNewOrder(order);
     for (const result of results) {

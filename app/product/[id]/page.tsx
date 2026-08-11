@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import CompareButton from "@/components/CompareButton";
+import FavoriteButton from "@/components/FavoriteButton";
 import ProductOrderActions from "@/components/product/ProductOrderActions";
 import ProductReviews from "@/components/product/ProductReviews";
 import StarRating from "@/components/StarRating";
@@ -197,6 +198,7 @@ export default async function ProductPage({
                   }}
                 />
                 <CompareButton productId={product.id} variant="full" />
+                <FavoriteButton sku={product.sku ?? product.id} variant="full" />
               </div>
             </div>
 

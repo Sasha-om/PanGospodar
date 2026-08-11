@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import CompareButton from "@/components/CompareButton";
+import FavoriteButton from "@/components/FavoriteButton";
 import StarRating from "@/components/StarRating";
 import {
   getProductAttributes,
@@ -31,8 +32,9 @@ export default function ProductCard({
 
   return (
     <div className="group relative flex flex-col overflow-hidden rounded-sm border border-stone-200 bg-white transition-colors duration-100 hover:border-accent-500">
-      {/* Sits above the link overlay so it stays clickable. */}
-      <div className="absolute right-2 top-2 z-20">
+      {/* Sits above the link overlay so these stay clickable. */}
+      <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5">
+        <FavoriteButton sku={sku} />
         <CompareButton productId={product.id} />
       </div>
 

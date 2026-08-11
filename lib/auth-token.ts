@@ -11,11 +11,22 @@
 
 export const SESSION_COOKIE = "panh_session";
 
+/**
+ * Customer sessions use their own cookie, not the admin one.
+ *
+ * Two separate cookies mean a customer token can never be presented where an
+ * admin token is read, so the admin guard cannot be reached with a customer
+ * login even if a role check were ever missed. `verifySession` checks the role
+ * as well — defence in depth, since both cookies are signed with the same key.
+ */
+export const CUSTOMER_COOKIE = "panh_customer";
+
+export type SessionRole = "admin" | "customer";
+
 export interface SessionPayload {
-  /** Subject — the admin username. */
+  /** Subject — the admin username, or the customer's numeric id as a string. */
   sub: string;
-  /** Coarse role, reserved for future permission checks. */
-  role: "admin";
+  role: SessionRole;
   /** Absolute expiry, milliseconds since epoch. */
   exp: number;
 }

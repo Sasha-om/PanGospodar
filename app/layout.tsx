@@ -5,8 +5,10 @@ import Header from "@/components/Header";
 import CompareBar from "@/components/CompareBar";
 import { CartProvider } from "@/context/CartContext";
 import { CompareProvider } from "@/context/CompareContext";
+import { FavoritesProvider } from "@/context/FavoritesContext";
 import { ProductsProvider } from "@/context/ProductsContext";
-import { getStoreSettings } from "@/lib/db";
+import { getCustomerId } from "@/lib/customer-session";
+import { getStoreSettings, hasDatabase, listFavorites } from "@/lib/db";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,11 +31,17 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Resolved here so the heart renders in its true state on first paint for a
+  // signed-in customer, instead of flashing empty until the client catches up.
+  const customerId = await getCustomerId();
+  const favorites =
+    customerId && hasDatabase() ? await listFavorites(customerId) : [];
+
   return (
     <html
       lang="uk"
@@ -43,10 +51,15 @@ export default function RootLayout({
         <CartProvider>
           <ProductsProvider>
             <CompareProvider>
-              <Header />
-              {children}
-              <Footer />
-              <CompareBar />
+              <FavoritesProvider
+                signedIn={customerId !== null}
+                initialSkus={favorites}
+              >
+                <Header />
+                {children}
+                <Footer />
+                <CompareBar />
+              </FavoritesProvider>
             </CompareProvider>
           </ProductsProvider>
         </CartProvider>
