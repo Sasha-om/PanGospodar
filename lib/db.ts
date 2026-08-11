@@ -95,6 +95,7 @@ interface ProductRow {
   brand?: string | null;
   image_url?: string | null;
   barcode?: string | null;
+  description?: string | null;
   is_promo?: boolean | null;
   is_bestseller?: boolean | null;
 }
@@ -158,6 +159,14 @@ export async function ensureProductsTable(): Promise<void> {
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS barcode text
   `;
+  // Marketing copy, written by the admin or by scripts/generate-descriptions.ts.
+  // Three states, and the difference matters to that script: NULL means "not
+  // looked at yet", empty string means "looked at, nothing reliable to say"
+  // (so it is never retried), and text is a real description.
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS description text
+  `;
   // Barcode lookups are exact-match, so a plain index is enough.
   await sql`
     CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)
@@ -212,7 +221,7 @@ function rowToProduct(row: ProductRow): Product {
     price: toNumber(row.price),
     quantity,
     inStock: quantity > 0,
-    shortDescription: "",
+    shortDescription: (row.description ?? "").trim(),
     techSpecs: { power: "", weight: "", warranty: "" },
     attributes: sanitizeAttributes(row.attributes),
     imageUrl: storedImage || LOCAL_PLACEHOLDER,
@@ -1641,4 +1650,102 @@ export async function claimOrderForCustomer(
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
   }
+}
+
+/* ----------------------- generated product content ----------------------- */
+
+/** One product handed to the description generator. */
+export interface GenerationCandidate {
+  sku: string;
+  name: string;
+  brand: string;
+  category: string;
+  barcode: string;
+}
+
+/**
+ * Products still waiting for a generated description.
+ *
+ * `description IS NULL` is the pending marker: the generator writes an empty
+ * string when the model does not recognise a product, so an unknown item is
+ * recorded as attempted and never picked up again. That makes the run
+ * resumable with no side file — the table itself is the checkpoint.
+ */
+export async function listProductsMissingDescription(
+  limit: number,
+): Promise<GenerationCandidate[]> {
+  const sql = getSql();
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 5000);
+  const run = async () =>
+    (await sql`
+      SELECT sku,
+             name,
+             COALESCE(brand, '')    AS brand,
+             COALESCE(category, '') AS category,
+             COALESCE(barcode, '')  AS barcode
+      FROM products
+      WHERE description IS NULL
+      ORDER BY sku
+      LIMIT ${safeLimit}
+    `) as GenerationCandidate[];
+
+  try {
+    return await run();
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureProductsTable();
+    return run();
+  }
+}
+
+/** How many products are still pending / already done. */
+export async function countGenerationProgress(): Promise<{
+  pending: number;
+  described: number;
+  unknown: number;
+}> {
+  const sql = getSql();
+  const run = async () =>
+    (await sql`
+      SELECT
+        count(*) FILTER (WHERE description IS NULL)::int        AS pending,
+        count(*) FILTER (WHERE description <> '')::int          AS described,
+        count(*) FILTER (WHERE description = '')::int           AS unknown
+      FROM products
+    `) as { pending: number; described: number; unknown: number }[];
+
+  try {
+    return (await run())[0];
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureProductsTable();
+    return (await run())[0];
+  }
+}
+
+/**
+ * Store generated copy for one product.
+ *
+ * `description` of `null` records "the model did not recognise this" as an
+ * empty string — the site shows nothing, and the next run skips it.
+ * Attributes are merged, not replaced: `generated || existing` lets any
+ * admin-entered value win a key clash, so a later hand edit is never
+ * overwritten by a re-run.
+ */
+export async function saveGeneratedContent(
+  sku: string,
+  description: string | null,
+  attributes: Record<string, string>,
+): Promise<void> {
+  const sql = getSql();
+  const text = (description ?? "").trim();
+  const clean = sanitizeAttributes(attributes);
+
+  await sql`
+    UPDATE products
+    SET description = ${text},
+        attributes  = ${JSON.stringify(clean)}::jsonb || COALESCE(attributes, '{}'::jsonb),
+        updated_at  = now()
+    WHERE sku = ${sku}
+  `;
 }
