@@ -31,6 +31,31 @@ export const CONTACT_CHANNELS = [
 
 export type ContactChannel = (typeof CONTACT_CHANNELS)[number]["value"];
 
+/**
+ * How the order reached us. All three land in the same `orders` table and the
+ * same admin list — the type only changes which fields are filled in and how
+ * the order is labelled.
+ *
+ *  - `CART`        — the full cart checkout at /checkout
+ *  - `BUY_NOW`     — "Купити" on a product page: one product, same details
+ *  - `RESERVATION` — "Зарезервувати": a hold on stock, with delivery and
+ *                    payment left for the dealer to agree by phone
+ */
+export const ORDER_TYPES = [
+  { value: "CART", label: "Замовлення з кошика", icon: "🛒" },
+  { value: "BUY_NOW", label: "Купівля з картки товару", icon: "⚡" },
+  { value: "RESERVATION", label: "Резерв товару", icon: "🔖" },
+] as const;
+
+export type OrderType = (typeof ORDER_TYPES)[number]["value"];
+
+/**
+ * Delivery and payment are a choice the customer has not made yet on a
+ * reservation. They are stored empty rather than guessed, and every reader
+ * (admin list, Telegram, email) omits the row when it is.
+ */
+export const UNSPECIFIED = "";
+
 export const ORDER_STATUSES = [
   { value: "NEW", label: "Нове" },
   { value: "CONFIRMED", label: "Підтверджено" },
@@ -100,14 +125,19 @@ export function describeShortages(shortages: StockShortage[]): string {
 }
 
 export interface OrderInput {
+  type: OrderType;
   firstName: string;
+  /** Empty on reservations — that form asks for a single name only. */
   lastName: string;
   phone: string;
   email: string;
   contactChannel: ContactChannel;
+  /** `UNSPECIFIED` on reservations. */
   city: string;
+  /** `UNSPECIFIED` on reservations. */
   warehouse: string;
-  paymentMethod: PaymentMethod;
+  /** `UNSPECIFIED` on reservations. */
+  paymentMethod: PaymentMethod | typeof UNSPECIFIED;
   comment: string;
   items: OrderItem[];
   total: number;
@@ -130,6 +160,15 @@ export function contactChannelLabel(value: string): string {
 
 export function orderStatusLabel(value: string): string {
   return ORDER_STATUSES.find((s) => s.value === value)?.label ?? value;
+}
+
+export function orderTypeLabel(value: string): string {
+  return ORDER_TYPES.find((t) => t.value === value)?.label ?? value;
+}
+
+/** A reservation has no delivery or payment to show. */
+export function isReservation(order: { type: OrderType }): boolean {
+  return order.type === "RESERVATION";
 }
 
 /**

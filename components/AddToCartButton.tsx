@@ -3,6 +3,13 @@
 import { useState } from "react";
 import { useCart, type CartProduct } from "@/context/CartContext";
 
+/**
+ * Secondary next to "Купити" on the product page: the cart is the slower path,
+ * so it reads as an outline rather than a second filled call to action.
+ */
+const buttonClass =
+  "w-full rounded-sm border-2 border-accent-500 bg-white px-6 py-3 text-base font-bold text-accent-600 transition-colors hover:bg-accent-50 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 disabled:hover:bg-white sm:w-auto";
+
 export default function AddToCartButton({
   product,
   disabled = false,
@@ -40,7 +47,7 @@ export default function AddToCartButton({
         type="button"
         onClick={handleClick}
         disabled={isDisabled}
-        className="w-full rounded-sm bg-accent-500 px-6 py-4 text-lg font-bold text-white transition-colors hover:bg-accent-600 disabled:cursor-not-allowed disabled:bg-stone-300 disabled:hover:bg-stone-300 sm:w-auto"
+        className={buttonClass}
       >
         {label()}
       </button>

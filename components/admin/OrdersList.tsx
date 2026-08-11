@@ -18,10 +18,13 @@ import {
 import {
   contactChannelLabel,
   formatOrderTotal,
+  isReservation,
   orderStatusLabel,
+  orderTypeLabel,
   paymentLabel,
   type Order,
   type OrderStatus,
+  type OrderType,
 } from "@/lib/orders";
 
 /**
@@ -34,6 +37,16 @@ const STATUS_BADGE: Record<OrderStatus, string> = {
   SHIPPED: "bg-blue-100 text-blue-800 ring-1 ring-blue-200",
   DONE: "bg-violet-100 text-violet-800 ring-1 ring-violet-200",
   CANCELLED: "bg-red-100 text-red-700 ring-1 ring-red-200",
+};
+
+/**
+ * How the order came in. A reservation needs a call back before it can ship,
+ * so it is worth spotting without opening the card.
+ */
+const TYPE_BADGE: Record<OrderType, string> = {
+  CART: "bg-stone-100 text-stone-600 ring-1 ring-stone-200",
+  BUY_NOW: "bg-orange-100 text-orange-800 ring-1 ring-orange-200",
+  RESERVATION: "bg-sky-100 text-sky-800 ring-1 ring-sky-200",
 };
 
 type TabId = "all" | "new" | "confirmed" | "cancelled" | "done";
@@ -220,6 +233,14 @@ export default function OrdersList({ orders }: { orders: Order[] }) {
                       >
                         {orderStatusLabel(order.status)}
                       </span>
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                          TYPE_BADGE[order.type] ??
+                          "bg-stone-100 text-stone-600"
+                        }`}
+                      >
+                        {orderTypeLabel(order.type)}
+                      </span>
                       <span className="text-xs text-stone-500">
                         {new Date(order.createdAt).toLocaleString("uk-UA")}
                       </span>
@@ -260,32 +281,45 @@ export default function OrdersList({ orders }: { orders: Order[] }) {
                   </div>
                 </div>
 
-                <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-                  <div className="flex gap-2">
-                    <dt className="shrink-0 text-stone-500">📲 Зв&apos;язок:</dt>
-                    <dd className="font-medium text-stone-800">
-                      {contactChannelLabel(order.contactChannel)}
-                    </dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="shrink-0 text-stone-500">💳 Оплата:</dt>
-                    <dd className="font-medium text-stone-800">
-                      {paymentLabel(order.paymentMethod)}
-                    </dd>
-                  </div>
-                  <div className="flex gap-2 sm:col-span-2">
-                    <dt className="shrink-0 text-stone-500">📍 Доставка:</dt>
-                    <dd className="font-medium text-stone-800">
-                      {order.city}, {order.warehouse}
-                    </dd>
-                  </div>
-                  {order.comment ? (
-                    <div className="flex gap-2 sm:col-span-2">
-                      <dt className="shrink-0 text-stone-500">💬 Коментар:</dt>
-                      <dd className="text-stone-800">{order.comment}</dd>
+                {/* A reservation has no delivery or payment yet — the seller
+                    agrees both on the call, so those rows would be empty. */}
+                {isReservation(order) ? (
+                  <p className="mt-3 rounded-sm border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-900">
+                    🔖 Товар зарезервовано. Зателефонуйте клієнту, щоб узгодити
+                    спосіб доставки та оплати.
+                  </p>
+                ) : (
+                  <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+                    <div className="flex gap-2">
+                      <dt className="shrink-0 text-stone-500">
+                        📲 Зв&apos;язок:
+                      </dt>
+                      <dd className="font-medium text-stone-800">
+                        {contactChannelLabel(order.contactChannel)}
+                      </dd>
                     </div>
-                  ) : null}
-                </dl>
+                    <div className="flex gap-2">
+                      <dt className="shrink-0 text-stone-500">💳 Оплата:</dt>
+                      <dd className="font-medium text-stone-800">
+                        {paymentLabel(order.paymentMethod)}
+                      </dd>
+                    </div>
+                    <div className="flex gap-2 sm:col-span-2">
+                      <dt className="shrink-0 text-stone-500">📍 Доставка:</dt>
+                      <dd className="font-medium text-stone-800">
+                        {order.city}, {order.warehouse}
+                      </dd>
+                    </div>
+                    {order.comment ? (
+                      <div className="flex gap-2 sm:col-span-2">
+                        <dt className="shrink-0 text-stone-500">
+                          💬 Коментар:
+                        </dt>
+                        <dd className="text-stone-800">{order.comment}</dd>
+                      </div>
+                    ) : null}
+                  </dl>
+                )}
 
                 <ul className="mt-3 rounded-sm border border-stone-200 bg-stone-50 p-3 text-sm">
                   {order.items.map((item, index) => (

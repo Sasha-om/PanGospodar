@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import CompareButton from "@/components/CompareButton";
+import ProductOrderActions from "@/components/product/ProductOrderActions";
 import ProductCarousel from "@/components/ProductCarousel";
 import { loadProducts } from "@/lib/catalog";
 import { findCoPurchasedSkus } from "@/lib/db";
@@ -162,18 +163,28 @@ export default async function ProductPage({
               </div>
             ) : null}
 
-            <div className="flex flex-wrap gap-3">
-              <AddToCartButton
+            <div className="flex flex-col gap-3">
+              <ProductOrderActions
+                productId={product.id}
+                name={product.name}
+                price={product.price}
+                stock={stock}
                 disabled={!inStock}
-                product={{
-                  id: product.id,
-                  name: product.name,
-                  price: product.price,
-                  imageUrl: product.imageUrl,
-                  stock,
-                }}
               />
-              <CompareButton productId={product.id} variant="full" />
+
+              <div className="flex flex-wrap gap-3">
+                <AddToCartButton
+                  disabled={!inStock}
+                  product={{
+                    id: product.id,
+                    name: product.name,
+                    price: product.price,
+                    imageUrl: product.imageUrl,
+                    stock,
+                  }}
+                />
+                <CompareButton productId={product.id} variant="full" />
+              </div>
             </div>
 
             {product.brand === "STIHL" ? (

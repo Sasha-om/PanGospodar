@@ -1,27 +1,19 @@
 "use server";
 
-import { createOrder, ensureStockSchema, hasDatabase } from "@/lib/db";
-import { notifyNewOrder } from "@/lib/notifications";
+import {
+  parseItems,
+  saveAndNotify,
+  type OrderFormState,
+} from "@/lib/order-intake";
 import {
   CONTACT_CHANNELS,
-  InsufficientStockError,
   PAYMENT_METHODS,
-  describeShortages,
   normalizePhone,
   type ContactChannel,
-  type OrderItem,
   type PaymentMethod,
 } from "@/lib/orders";
 
-export interface CheckoutState {
-  ok?: boolean;
-  orderId?: number;
-  error?: string;
-  /** Field-level messages keyed by input name. */
-  fieldErrors?: Record<string, string>;
-}
-
-const MAX_ITEMS = 200;
+export type CheckoutState = OrderFormState;
 
 function isPaymentMethod(value: string): value is PaymentMethod {
   return PAYMENT_METHODS.some((method) => method.value === value);
@@ -29,34 +21,6 @@ function isPaymentMethod(value: string): value is PaymentMethod {
 
 function isContactChannel(value: string): value is ContactChannel {
   return CONTACT_CHANNELS.some((channel) => channel.value === value);
-}
-
-/** Items come from the client cart, so prices/quantities are re-validated. */
-function parseItems(raw: string): OrderItem[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
-
-  return parsed
-    .slice(0, MAX_ITEMS)
-    .map((entry) => {
-      const item = (entry ?? {}) as Record<string, unknown>;
-      const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
-      const price = Math.max(0, Number(item.price) || 0);
-      return {
-        sku: String(item.sku ?? item.id ?? "").trim(),
-        name: String(item.name ?? "").trim(),
-        price,
-        quantity,
-      };
-    })
-    .filter((item) => item.name && item.quantity > 0);
 }
 
 export async function submitOrder(
@@ -116,18 +80,9 @@ export async function submitOrder(
     0,
   );
 
-  if (!hasDatabase()) {
-    console.error("[checkout] No database configured — cannot save order");
-    return {
-      error:
-        "Сервер тимчасово не може прийняти замовлення. Зателефонуйте нам, будь ласка.",
-    };
-  }
-
-  try {
-    // Also installs the stock guard the deduction below relies on.
-    await ensureStockSchema();
-    const order = await createOrder({
+  return saveAndNotify(
+    {
+      type: "CART",
       firstName,
       lastName,
       phone: phone!,
@@ -139,37 +94,7 @@ export async function submitOrder(
       comment,
       items,
       total,
-    });
-
-    // The order is saved; notifications are best-effort and never block it.
-    const results = await notifyNewOrder(order);
-    for (const result of results) {
-      if (!result.ok && !result.skipped) {
-        console.error(
-          `[checkout] Order #${order.id} saved but ${result.channel} failed: ${result.error}`,
-        );
-      }
-    }
-
-    return { ok: true, orderId: order.id };
-  } catch (caught) {
-    if (caught instanceof InsufficientStockError) {
-      // The order was rolled back together with the stock deduction, so the
-      // customer can fix the cart and try again without a duplicate order.
-      console.warn(
-        `[checkout] Rejected — insufficient stock: ${caught.shortages
-          .map((item) => `${item.sku} (${item.available}/${item.required})`)
-          .join(", ")}`,
-      );
-      return {
-        error: `${describeShortages(caught.shortages)} Змініть кількість у кошику або зателефонуйте нам.`,
-      };
-    }
-    const message = caught instanceof Error ? caught.message : String(caught);
-    console.error(`[checkout] Failed to save order: ${message}`);
-    return {
-      error:
-        "Не вдалося зберегти замовлення. Спробуйте ще раз або зателефонуйте нам.",
-    };
-  }
+    },
+    "checkout",
+  );
 }

@@ -1,6 +1,7 @@
 import {
   contactChannelLabel,
   formatOrderTotal,
+  isReservation,
   paymentLabel,
   type Order,
 } from "@/lib/orders";
@@ -29,20 +30,45 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/** Heading that tells the seller at a glance what kind of request came in. */
+function telegramHeading(order: Order): string {
+  switch (order.type) {
+    case "RESERVATION":
+      return `🔖 <b>РЕЗЕРВ ТОВАРУ #${order.id}</b>`;
+    case "BUY_NOW":
+      return `⚡ <b>КУПІВЛЯ З КАРТКИ ТОВАРУ #${order.id}</b>`;
+    default:
+      return `🛍️ <b>НОВЕ ЗАМОВЛЕННЯ #${order.id}</b>`;
+  }
+}
+
 export function buildTelegramMessage(order: Order): string {
   const lines = [
-    `🛍️ <b>НОВЕ ЗАМОВЛЕННЯ #${order.id}</b>`,
+    telegramHeading(order),
     "",
     `👤 <b>Клієнт:</b> ${escapeHtml(`${order.firstName} ${order.lastName}`.trim())}`,
     `📞 <b>Телефон:</b> ${escapeHtml(order.phone)}`,
-    `📲 <b>Спосіб зв'язку:</b> ${escapeHtml(contactChannelLabel(order.contactChannel))}`,
-    `📍 <b>Доставка:</b> ${escapeHtml(order.city)}, ${escapeHtml(order.warehouse)}`,
-    `💳 <b>Спосіб оплати:</b> ${escapeHtml(paymentLabel(order.paymentMethod))}`,
-    `💬 <b>Коментар:</b> ${escapeHtml(order.comment.trim() || "Відсутній")}`,
   ];
 
+  // Keep every way of reaching the customer together, before the order detail.
   if (order.email.trim()) {
     lines.push(`✉️ <b>Email:</b> ${escapeHtml(order.email)}`);
+  }
+
+  // A reservation carries no delivery or payment choice — the seller agrees
+  // both on the call, so printing empty rows would only add noise.
+  if (isReservation(order)) {
+    lines.push(
+      "",
+      "⚠️ <b>Товар зарезервовано.</b> Зателефонуйте клієнту, щоб узгодити спосіб доставки та оплати.",
+    );
+  } else {
+    lines.push(
+      `📲 <b>Спосіб зв'язку:</b> ${escapeHtml(contactChannelLabel(order.contactChannel))}`,
+      `📍 <b>Доставка:</b> ${escapeHtml(order.city)}, ${escapeHtml(order.warehouse)}`,
+      `💳 <b>Спосіб оплати:</b> ${escapeHtml(paymentLabel(order.paymentMethod))}`,
+      `💬 <b>Коментар:</b> ${escapeHtml(order.comment.trim() || "Відсутній")}`,
+    );
   }
 
   lines.push("", "📦 <b>Товари:</b>");
@@ -98,7 +124,19 @@ export async function sendTelegramNotification(
 
 /* --------------------------------- Email -------------------------------- */
 
+function emailHeading(order: Order): string {
+  switch (order.type) {
+    case "RESERVATION":
+      return `🔖 Резерв товару #${order.id}`;
+    case "BUY_NOW":
+      return `⚡ Купівля з картки товару #${order.id}`;
+    default:
+      return `🛍️ Нове замовлення #${order.id}`;
+  }
+}
+
 export function buildOrderEmailHtml(order: Order): string {
+  const reservation = isReservation(order);
   const rows = order.items
     .map(
       (item) => `
@@ -125,7 +163,7 @@ export function buildOrderEmailHtml(order: Order): string {
 <html lang="uk"><body style="margin:0;background:#f5f5f4;font-family:Arial,Helvetica,sans-serif;color:#292524">
   <div style="max-width:640px;margin:0 auto;padding:24px">
     <div style="background:#fff;border:1px solid #e7e5e4;border-radius:4px;padding:24px">
-      <h1 style="margin:0 0 4px;font-size:20px">🛍️ Нове замовлення #${order.id}</h1>
+      <h1 style="margin:0 0 4px;font-size:20px">${emailHeading(order)}</h1>
       <p style="margin:0 0 20px;color:#78716c;font-size:13px">
         ПанГосподар · ${new Date(order.createdAt).toLocaleString("uk-UA")}
       </p>
@@ -135,16 +173,22 @@ export function buildOrderEmailHtml(order: Order): string {
         ${field("Ім'я", `${order.firstName} ${order.lastName}`.trim())}
         ${field("Телефон", order.phone)}
         ${order.email.trim() ? field("Email", order.email) : ""}
-        ${field("Спосіб зв'язку", contactChannelLabel(order.contactChannel))}
+        ${reservation ? "" : field("Спосіб зв'язку", contactChannelLabel(order.contactChannel))}
       </table>
 
-      <h2 style="font-size:14px;text-transform:uppercase;color:#78716c;margin:0 0 8px">Доставка та оплата</h2>
+      ${
+        reservation
+          ? `<p style="margin:0 0 20px;padding:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:4px;font-size:14px;color:#9a3412">
+        <strong>Товар зарезервовано.</strong> Зателефонуйте клієнту, щоб узгодити спосіб доставки та оплати.
+      </p>`
+          : `<h2 style="font-size:14px;text-transform:uppercase;color:#78716c;margin:0 0 8px">Доставка та оплата</h2>
       <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:20px">
         ${field("Місто", order.city)}
         ${field("Відділення", order.warehouse)}
         ${field("Оплата", paymentLabel(order.paymentMethod))}
         ${field("Коментар", order.comment.trim() || "Відсутній")}
-      </table>
+      </table>`
+      }
 
       <h2 style="font-size:14px;text-transform:uppercase;color:#78716c;margin:0 0 8px">Товари</h2>
       <table style="width:100%;border-collapse:collapse;font-size:14px">
@@ -192,7 +236,7 @@ export async function sendEmailNotification(
       body: JSON.stringify({
         from,
         to: [to],
-        subject: `Нове замовлення #${order.id} — ${order.firstName} ${order.lastName}`.trim(),
+        subject: `${emailHeading(order)} — ${order.firstName} ${order.lastName}`.trim(),
         html: buildOrderEmailHtml(order),
         reply_to: order.email.trim() || undefined,
       }),

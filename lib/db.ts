@@ -13,6 +13,7 @@ import {
   type OrderInput,
   type OrderItem,
   type OrderStatus,
+  type OrderType,
   type StockShortage,
 } from "@/lib/orders";
 import {
@@ -363,6 +364,13 @@ export async function ensureOrdersTable(): Promise<void> {
     ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS stock_applied boolean NOT NULL DEFAULT false
   `;
+  // How the order was placed: cart checkout, "Купити" or "Зарезервувати".
+  // Rows that predate the product-page buttons are all cart checkouts, which
+  // is exactly what the default backfills them to.
+  await sql`
+    ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'CART'
+  `;
   // "Купують разом" matches baskets with `items @> '[{"sku": "..."}]'`.
   await sql`
     CREATE INDEX IF NOT EXISTS orders_items_gin_idx
@@ -373,6 +381,7 @@ export async function ensureOrdersTable(): Promise<void> {
 interface OrderRow {
   id: number;
   status: string;
+  type: string | null;
   first_name: string;
   last_name: string;
   phone: string;
@@ -391,6 +400,7 @@ function rowToOrder(row: OrderRow): Order {
   return {
     id: row.id,
     status: (row.status as OrderStatus) ?? "NEW",
+    type: (row.type as OrderType) ?? "CART",
     firstName: row.first_name ?? "",
     lastName: row.last_name ?? "",
     phone: row.phone ?? "",
@@ -532,10 +542,11 @@ export async function createOrder(input: OrderInput): Promise<Order> {
   // retry after a migration must not reuse an already-sent one.
   const insert = () => sql`
     INSERT INTO orders (
-      status, first_name, last_name, phone, email, contact_channel,
+      status, type, first_name, last_name, phone, email, contact_channel,
       city, warehouse, payment_method, comment, items, total, stock_applied
     ) VALUES (
       'NEW',
+      ${input.type},
       ${input.firstName},
       ${input.lastName},
       ${input.phone},
