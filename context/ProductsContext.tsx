@@ -8,7 +8,11 @@ import {
   useMemo,
   useState,
 } from "react";
-import { products as seedProducts, type Product } from "@/lib/products";
+import {
+  getProductImages,
+  products as seedProducts,
+  type Product,
+} from "@/lib/products";
 
 /** A full product without its generated id (imageUrl is included and editable). */
 export type ProductInput = Omit<Product, "id">;
@@ -111,6 +115,9 @@ export function ProductsProvider({
           price: product.price,
           stock: product.quantity ?? 0,
           imageUrl: product.imageUrl,
+          // Main photo first, gallery after — the server keeps the two columns
+          // in step, so sending the whole list is enough.
+          images: getProductImages(product),
           barcode: product.barcode ?? "",
           attributes: product.attributes ?? {},
           isPromo: product.isPromo === true,

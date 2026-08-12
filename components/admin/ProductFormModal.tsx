@@ -2,12 +2,23 @@
 
 import { useEffect, useState } from "react";
 import { upload } from "@vercel/blob/client";
-import { ImageOff, Loader2, Plus, Trash2, Upload, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ImageOff,
+  Loader2,
+  Plus,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { placeholderImage, type ProductInput } from "@/context/ProductsContext";
 import {
+  MAX_PRODUCT_IMAGES,
   PRODUCT_BADGES,
   categories,
   getProductAttributes,
+  getProductImages,
   type Product,
 } from "@/lib/products";
 
@@ -54,7 +65,8 @@ export interface ProductFormValues {
   price: string;
   stock: string;
   barcode: string;
-  imageUrl: string;
+  /** Every photo, in display order. The first one is the main photo. */
+  images: string[];
   shortDescription: string;
   attributes: AttributeRow[];
   isPromo: boolean;
@@ -74,7 +86,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormValues = {
   price: "",
   stock: "0",
   barcode: "",
-  imageUrl: "",
+  images: [],
   shortDescription: "",
   attributes: [],
   isPromo: false,
@@ -102,10 +114,20 @@ export default function ProductFormModal({
 }) {
   const [values, setValues] = useState<ProductFormValues>(initialValues);
   const [error, setError] = useState<string | null>(null);
-  const [imageError, setImageError] = useState(false);
+  /** URLs whose <img> failed to load — shown as a broken tile, not a blank one. */
+  const [brokenImages, setBrokenImages] = useState<string[]>([]);
+  const [urlDraft, setUrlDraft] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  /** Position in a multi-file upload, e.g. "2 / 5". Null while idle. */
+  const [uploadQueue, setUploadQueue] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const images = values.images;
+  const roomLeft = MAX_PRODUCT_IMAGES - images.length;
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -129,54 +151,143 @@ export default function ProductFormModal({
     setValues((prev) => ({ ...prev, [key]: value }));
   }
 
-  /* ------------------------------ photo upload --------------------------- */
+  /* -------------------------------- photos -------------------------------- */
+
+  /** Append photos, keeping the list free of duplicates and within the cap. */
+  function appendImages(urls: string[]) {
+    setValues((prev) => {
+      const next = [...prev.images];
+      for (const raw of urls) {
+        const url = raw.trim();
+        if (!url || next.includes(url) || next.length >= MAX_PRODUCT_IMAGES) {
+          continue;
+        }
+        next.push(url);
+      }
+      return next.length === prev.images.length ? prev : { ...prev, images: next };
+    });
+  }
+
+  function removeImage(url: string) {
+    setValues((prev) => ({
+      ...prev,
+      images: prev.images.filter((item) => item !== url),
+    }));
+  }
+
+  /** Move a photo one slot left or right; the first slot is the main photo. */
+  function moveImage(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    setValues((prev) => {
+      if (index < 0 || target < 0 || target >= prev.images.length) {
+        return prev;
+      }
+      const next = [...prev.images];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...prev, images: next };
+    });
+  }
+
+  function addImageFromUrl() {
+    const url = urlDraft.trim();
+    if (!url) {
+      return;
+    }
+    if (images.includes(url)) {
+      setUploadError("Це фото вже додане.");
+      return;
+    }
+    if (roomLeft <= 0) {
+      setUploadError(`Максимум ${MAX_PRODUCT_IMAGES} фотографій на товар.`);
+      return;
+    }
+    setUploadError(null);
+    appendImages([url]);
+    setUrlDraft("");
+  }
 
   /**
-   * Send the chosen file straight to Vercel Blob and put the resulting public
-   * URL into the image field. The file does not pass through our server —
+   * Send the chosen files straight to Vercel Blob and append the resulting
+   * public URLs to the gallery. Files do not pass through our server —
    * `/api/admin/upload` only issues a token — so phone-sized photos are fine.
+   *
+   * Uploaded one at a time on purpose: the progress bar then means something,
+   * and a failure on file 3 still keeps files 1 and 2.
    */
-  async function handleFileSelected(
+  async function handleFilesSelected(
     event: React.ChangeEvent<HTMLInputElement>,
   ) {
-    const file = event.target.files?.[0];
-    // Reset immediately so picking the same file twice fires onChange again.
+    const picked = [...(event.target.files ?? [])];
+    // Reset immediately so picking the same files twice fires onChange again.
     event.target.value = "";
-    if (!file) {
+    if (picked.length === 0) {
       return;
     }
 
     setUploadError(null);
-    if (!file.type.startsWith("image/")) {
-      setUploadError("Оберіть файл зображення.");
-      return;
+    const problems: string[] = [];
+    const accepted: File[] = [];
+
+    for (const file of picked) {
+      if (!file.type.startsWith("image/")) {
+        problems.push(`«${file.name}» — не зображення.`);
+      } else if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+        problems.push(
+          `«${file.name}» — завеликий (${(file.size / 1024 / 1024).toFixed(1)} МБ).`,
+        );
+      } else {
+        accepted.push(file);
+      }
     }
-    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      setUploadError(
-        `Файл завеликий (${(file.size / 1024 / 1024).toFixed(1)} МБ). Максимум — ${MAX_UPLOAD_MB} МБ.`,
+
+    // `roomLeft` is a snapshot from this render, which is exactly right: no
+    // other upload can be running while this one holds the input disabled.
+    const queue = accepted.slice(0, Math.max(0, roomLeft));
+    if (accepted.length > queue.length) {
+      problems.push(
+        `Взято перші ${queue.length}: максимум ${MAX_PRODUCT_IMAGES} фотографій на товар.`,
       );
+    }
+
+    if (queue.length === 0) {
+      setUploadError(problems.join(" ") || "Немає файлів для завантаження.");
       return;
     }
 
     setUploading(true);
+    setUploadQueue({ done: 0, total: queue.length });
     setUploadProgress(0);
-    try {
-      const result = await upload(`products/${safeFileName(file.name)}`, file, {
-        access: "public",
-        handleUploadUrl: "/api/admin/upload",
-        onUploadProgress: ({ percentage }) => {
-          setUploadProgress(Math.round(percentage));
-        },
-      });
-      setField("imageUrl", result.url);
-      setImageError(false);
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
-      console.error("[admin/upload] Failed:", caught);
-      setUploadError(uploadErrorMessage(message));
-    } finally {
-      setUploading(false);
+
+    const uploaded: string[] = [];
+    for (const [index, file] of queue.entries()) {
+      setUploadQueue({ done: index, total: queue.length });
+      setUploadProgress(0);
+      try {
+        const result = await upload(
+          `products/${safeFileName(file.name)}`,
+          file,
+          {
+            access: "public",
+            handleUploadUrl: "/api/admin/upload",
+            onUploadProgress: ({ percentage }) => {
+              setUploadProgress(Math.round(percentage));
+            },
+          },
+        );
+        uploaded.push(result.url);
+      } catch (caught) {
+        const message =
+          caught instanceof Error ? caught.message : String(caught);
+        console.error("[admin/upload] Failed:", caught);
+        problems.push(`«${file.name}»: ${uploadErrorMessage(message)}`);
+      }
     }
+
+    appendImages(uploaded);
+    setUploading(false);
+    setUploadQueue(null);
+    setUploadProgress(0);
+    setUploadError(problems.length > 0 ? problems.join(" ") : null);
   }
 
   /* ----------------------------- attributes ----------------------------- */
@@ -239,7 +350,10 @@ export default function ProductFormModal({
     }
 
     const quantity = Math.max(0, Math.round(Number(values.stock) || 0));
-    const imageUrl = values.imageUrl.trim() || placeholderImage(name);
+    // The first photo is the main one; the rest travel as the gallery. With no
+    // photos at all we still generate a placeholder, as before.
+    const gallery = values.images.map((url) => url.trim()).filter(Boolean);
+    const imageUrl = gallery[0] ?? placeholderImage(name);
 
     const barcode = values.barcode.trim();
 
@@ -252,6 +366,7 @@ export default function ProductFormModal({
       inStock: quantity > 0,
       barcode: barcode || undefined,
       imageUrl,
+      images: gallery.slice(1),
       shortDescription: values.shortDescription.trim(),
       techSpecs: { power: "", weight: "", warranty: "" },
       attributes,
@@ -418,13 +533,20 @@ export default function ProductFormModal({
               </p>
             </div>
 
+            {/* ------------------------- Photos -------------------------- */}
             <div className="sm:col-span-2">
-              <span className={labelClass}>Фотографія товару</span>
+              <div className="flex items-center justify-between">
+                <span className={labelClass}>Фотографії товару</span>
+                <span className="text-xs font-semibold text-stone-500">
+                  {images.length} / {MAX_PRODUCT_IMAGES}
+                </span>
+              </div>
+
               <div className="mt-1.5 flex flex-wrap items-center gap-3">
                 <label
                   htmlFor="pf-file"
                   className={`flex items-center gap-2 rounded-sm border px-4 py-2 text-sm font-bold transition-colors ${
-                    uploading
+                    uploading || roomLeft <= 0
                       ? "cursor-not-allowed border-stone-200 bg-stone-100 text-stone-400"
                       : "cursor-pointer border-accent-500 bg-accent-50 text-accent-700 hover:bg-accent-100"
                   }`}
@@ -435,17 +557,21 @@ export default function ProductFormModal({
                     <Upload className="h-4 w-4" aria-hidden="true" />
                   )}
                   {uploading
-                    ? `Завантаження… ${uploadProgress}%`
+                    ? `Завантаження ${(uploadQueue?.done ?? 0) + 1} з ${uploadQueue?.total ?? 1}… ${uploadProgress}%`
                     : "Завантажити з пристрою"}
                 </label>
                 <input
                   id="pf-file"
                   type="file"
                   accept="image/*"
-                  disabled={uploading}
-                  onChange={handleFileSelected}
+                  multiple
+                  disabled={uploading || roomLeft <= 0}
+                  onChange={handleFilesSelected}
                   className="sr-only"
                 />
+                <span className="text-xs text-stone-500">
+                  Можна вибрати кілька файлів одразу
+                </span>
               </div>
 
               {uploading ? (
@@ -469,57 +595,128 @@ export default function ProductFormModal({
                 </p>
               ) : null}
 
-              <p className="mt-1 text-xs text-stone-500">
-                JPEG, PNG, WebP, AVIF або GIF, до {MAX_UPLOAD_MB} МБ. Файл
-                зберігається у Vercel Blob, а посилання підставляється в поле
-                нижче.
-              </p>
-            </div>
-
-            <div className="sm:col-span-2">
-              <label htmlFor="pf-image" className={labelClass}>
-                …або URL фотографії
-              </label>
-              <input
-                id="pf-image"
-                type="url"
-                inputMode="url"
-                placeholder="https://example.com/photo.jpg"
-                value={values.imageUrl}
-                onChange={(event) => {
-                  setField("imageUrl", event.target.value);
-                  setImageError(false);
-                }}
-                className={fieldClass}
-              />
-              <p className="mt-1 text-xs text-stone-500">
-                Залиште порожнім, щоб згенерувати зображення-заповнювач.
-              </p>
-            </div>
-
-            <div className="sm:col-span-2">
-              <span className={labelClass}>Попередній перегляд</span>
-              <div className="mt-1.5 flex h-40 items-center justify-center overflow-hidden rounded-sm border border-stone-200 bg-stone-50">
-                {values.imageUrl.trim() && !imageError ? (
-                  // Arbitrary user-supplied URLs with graceful error handling.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={values.imageUrl.trim()}
-                    alt="Попередній перегляд фотографії товару"
-                    className="h-full w-full object-contain"
-                    onError={() => setImageError(true)}
+              {/* Add by URL */}
+              <div className="mt-3 flex items-start gap-2">
+                <div className="flex-1">
+                  <label htmlFor="pf-image" className="sr-only">
+                    URL фотографії
+                  </label>
+                  <input
+                    id="pf-image"
+                    type="url"
+                    inputMode="url"
+                    placeholder="…або вставте URL фотографії"
+                    value={urlDraft}
+                    onChange={(event) => setUrlDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      // Enter here must add a photo, not submit the whole form.
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addImageFromUrl();
+                      }
+                    }}
+                    className={`${fieldClass} mt-0`}
                   />
-                ) : (
-                  <div className="flex flex-col items-center gap-2 px-4 text-center text-stone-400">
-                    <ImageOff className="h-8 w-8" aria-hidden="true" />
-                    <span className="text-xs">
-                      {imageError
-                        ? "Не вдалося завантажити зображення за цим URL"
-                        : "Зображення з'явиться тут"}
-                    </span>
-                  </div>
-                )}
+                </div>
+                <button
+                  type="button"
+                  onClick={addImageFromUrl}
+                  disabled={!urlDraft.trim() || roomLeft <= 0}
+                  className="inline-flex items-center gap-1.5 rounded-sm border border-stone-300 px-3 py-2 text-sm font-bold text-stone-700 transition-colors hover:border-accent-500 hover:text-accent-600 disabled:cursor-not-allowed disabled:border-stone-200 disabled:text-stone-400 disabled:hover:border-stone-200"
+                >
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  Додати
+                </button>
               </div>
+
+              {/* Gallery */}
+              {images.length === 0 ? (
+                <div className="mt-3 flex h-32 flex-col items-center justify-center gap-2 rounded-sm border border-dashed border-stone-300 text-stone-400">
+                  <ImageOff className="h-7 w-7" aria-hidden="true" />
+                  <span className="px-4 text-center text-xs">
+                    Фотографій немає — буде згенеровано зображення-заповнювач
+                  </span>
+                </div>
+              ) : (
+                <ul className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  {images.map((url, index) => (
+                    <li
+                      key={url}
+                      className={`overflow-hidden rounded-sm border ${
+                        index === 0 ? "border-accent-500" : "border-stone-200"
+                      }`}
+                    >
+                      <div className="relative flex h-24 items-center justify-center bg-stone-50">
+                        {brokenImages.includes(url) ? (
+                          <div className="flex flex-col items-center gap-1 px-2 text-center text-stone-400">
+                            <ImageOff className="h-5 w-5" aria-hidden="true" />
+                            <span className="text-[10px]">Не завантажилось</span>
+                          </div>
+                        ) : (
+                          // Arbitrary user-supplied URLs with graceful error
+                          // handling — next/image cannot do the onError fallback.
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={url}
+                            alt={`Фото ${index + 1}`}
+                            className="h-full w-full object-contain"
+                            onError={() =>
+                              setBrokenImages((prev) =>
+                                prev.includes(url) ? prev : [...prev, url],
+                              )
+                            }
+                          />
+                        )}
+                        {index === 0 ? (
+                          <span className="absolute left-1 top-1 rounded-sm bg-accent-500 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+                            Головна
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-stone-200 bg-white px-1 py-1">
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => moveImage(index, -1)}
+                            disabled={index === 0}
+                            aria-label={`Перемістити фото ${index + 1} ліворуч`}
+                            className="rounded-sm p-1 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:cursor-not-allowed disabled:text-stone-300 disabled:hover:bg-transparent"
+                          >
+                            <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveImage(index, 1)}
+                            disabled={index === images.length - 1}
+                            aria-label={`Перемістити фото ${index + 1} праворуч`}
+                            className="rounded-sm p-1 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:cursor-not-allowed disabled:text-stone-300 disabled:hover:bg-transparent"
+                          >
+                            <ArrowRight
+                              className="h-3.5 w-3.5"
+                              aria-hidden="true"
+                            />
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeImage(url)}
+                          aria-label={`Видалити фото ${index + 1}`}
+                          className="rounded-sm p-1 text-stone-500 transition-colors hover:bg-red-50 hover:text-red-600"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <p className="mt-1.5 text-xs text-stone-500">
+                JPEG, PNG, WebP, AVIF або GIF, до {MAX_UPLOAD_MB} МБ кожен.
+                Перша фотографія — головна: саме вона показується на картці
+                товару, решта — у галереї на сторінці товару.
+              </p>
             </div>
 
             {/* ---------------------- Characteristics ---------------------- */}
@@ -636,7 +833,7 @@ export function toFormValues(product: Product): ProductFormValues {
     price: String(product.price),
     stock: String(product.quantity ?? 0),
     barcode: product.barcode ?? "",
-    imageUrl: product.imageUrl,
+    images: getProductImages(product),
     shortDescription: product.shortDescription,
     // Merge legacy techSpecs into the editable list so nothing is lost.
     attributes: getProductAttributes(product).map(([label, value]) =>

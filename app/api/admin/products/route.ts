@@ -3,6 +3,7 @@ import {
   ensureProductsTable,
   hasDatabase,
   sanitizeAttributes,
+  sanitizeImageList,
   updateProductFromAdmin,
 } from "@/lib/db";
 import { getSession } from "@/lib/session";
@@ -79,6 +80,7 @@ export async function POST(request: Request) {
       price: Math.max(0, toNumber(payload.price)),
       stock: Math.max(0, Math.round(toNumber(payload.stock))),
       imageUrl: String(payload.imageUrl ?? "").trim(),
+      images: sanitizeImageList(payload.images),
       barcode: String(payload.barcode ?? "").trim(),
       attributes: sanitizeAttributes(payload.attributes),
       isPromo: payload.isPromo === true,

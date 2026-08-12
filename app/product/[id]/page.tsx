@@ -1,16 +1,16 @@
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import AddToCartButton from "@/components/AddToCartButton";
 import CompareButton from "@/components/CompareButton";
 import FavoriteButton from "@/components/FavoriteButton";
+import ProductGallery from "@/components/product/ProductGallery";
 import ProductOrderActions from "@/components/product/ProductOrderActions";
 import ProductReviews from "@/components/product/ProductReviews";
 import StarRating from "@/components/StarRating";
 import ProductCarousel from "@/components/ProductCarousel";
 import { loadProducts } from "@/lib/catalog";
 import { findCoPurchasedSkus } from "@/lib/db";
-import { getProductAttributes } from "@/lib/products";
+import { getProductAttributes, getProductImages } from "@/lib/products";
 import { findBoughtTogether, findSimilarProducts } from "@/lib/recommendations";
 
 // Read the live sync feed on every request so prices/stock are current.
@@ -82,16 +82,10 @@ export default async function ProductPage({
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 pb-16 sm:px-6">
         <div className="grid grid-cols-1 gap-10 lg:grid-cols-2">
-          <div className="relative aspect-square w-full overflow-hidden rounded-sm border border-stone-200 bg-stone-50">
-            <Image
-              src={product.imageUrl}
-              alt={product.name}
-              fill
-              priority
-              className="object-cover"
-              sizes="(max-width: 1024px) 100vw, 50vw"
-            />
-          </div>
+          <ProductGallery
+            images={getProductImages(product)}
+            alt={product.name}
+          />
 
           <div className="flex flex-col gap-6">
             <div>

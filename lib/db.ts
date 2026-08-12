@@ -1,6 +1,6 @@
 import { neon } from "@neondatabase/serverless";
 import { unstable_cache } from "next/cache";
-import type { Product } from "@/lib/products";
+import { MAX_PRODUCT_IMAGES, type Product } from "@/lib/products";
 import {
   DEFAULT_STORE_SETTINGS,
   normalizeStoreSettings,
@@ -99,6 +99,8 @@ interface ProductRow {
   category?: string | null;
   brand?: string | null;
   image_url?: string | null;
+  /** `images` JSONB — an array of photo URLs, the main one first. */
+  images?: unknown;
   barcode?: string | null;
   description?: string | null;
   is_promo?: boolean | null;
@@ -121,6 +123,37 @@ export function sanitizeAttributes(
     }
   }
   return clean;
+}
+
+/** Longer than any real image URL; a guard against a pasted data: blob. */
+const MAX_IMAGE_URL_LENGTH = 2048;
+
+/**
+ * Clean a list of photo URLs: trims, drops empties and duplicates, caps both
+ * the length of a single URL and the number of photos.
+ *
+ * Anything that is not an array of strings collapses to `[]` — a malformed
+ * JSONB value (or a hand-crafted request body) can never reach the gallery.
+ */
+export function sanitizeImageList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const clean = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const url = entry.trim();
+    if (!url || url.length > MAX_IMAGE_URL_LENGTH) {
+      continue;
+    }
+    clean.add(url);
+    if (clean.size >= MAX_PRODUCT_IMAGES) {
+      break;
+    }
+  }
+  return [...clean];
 }
 
 function toNumber(value: string | number | null | undefined): number {
@@ -163,6 +196,13 @@ export async function ensureProductsTable(): Promise<void> {
   await sql`
     ALTER TABLE products
     ADD COLUMN IF NOT EXISTS barcode text
+  `;
+  // Every photo of the product, main one first — `image_url` keeps holding that
+  // first entry so all the older readers (cards, cart, feeds) keep working on a
+  // database where this column is still empty.
+  await sql`
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS images jsonb NOT NULL DEFAULT '[]'::jsonb
   `;
   // Marketing copy, written by the admin or by scripts/generate-descriptions.ts.
   // Three states, and the difference matters to that script: NULL means "not
@@ -215,6 +255,11 @@ function rowToProduct(row: ProductRow): Product {
   const storedImage = (row.image_url ?? "").trim();
   // Nullable in the database and optional everywhere downstream.
   const storedBarcode = (row.barcode ?? "").trim();
+  // The gallery, with the main photo resolved from it when `image_url` is empty
+  // (older rows) and the main photo never repeated inside `images`.
+  const gallery = sanitizeImageList(row.images);
+  const mainImage = storedImage || gallery[0] || LOCAL_PLACEHOLDER;
+  const extraImages = gallery.filter((url) => url !== mainImage);
 
   return {
     id: row.sku,
@@ -229,7 +274,10 @@ function rowToProduct(row: ProductRow): Product {
     shortDescription: (row.description ?? "").trim(),
     techSpecs: { power: "", weight: "", warranty: "" },
     attributes: sanitizeAttributes(row.attributes),
-    imageUrl: storedImage || LOCAL_PLACEHOLDER,
+    imageUrl: mainImage,
+    // Left out entirely when there is only one photo, so the common product
+    // carries no extra field through the API payload.
+    ...(extraImages.length > 0 ? { images: extraImages } : {}),
     categorySlug: safeCategorySlug(storedCategory || inferCategory(name)),
     isPromo: row.is_promo === true,
     isBestseller: row.is_bestseller === true,
@@ -284,6 +332,11 @@ export interface AdminProductUpdate {
   price: number;
   stock: number;
   imageUrl: string;
+  /**
+   * Every photo, in the order the admin arranged them. May or may not already
+   * contain `imageUrl` — `updateProductFromAdmin` merges the two.
+   */
+  images: string[];
   /** Empty string clears the barcode (stored as NULL). */
   barcode: string;
   attributes: Record<string, string>;
@@ -308,10 +361,14 @@ export async function updateProductFromAdmin(
   // `products_stock_non_negative` would reject a negative; a negative on-hand
   // count means "none left" anyway, which is how the catalog already reads it.
   const stock = Math.max(0, update.stock);
+  // One list, main photo first, deduped — and `image_url` is kept in step with
+  // its first entry so the two columns can never disagree about the main photo.
+  const images = sanitizeImageList([update.imageUrl, ...update.images]);
+  const imageUrl = images[0] ?? update.imageUrl.trim();
 
   await sql`
     INSERT INTO products (
-      sku, name, price, stock, brand, category, image_url, barcode,
+      sku, name, price, stock, brand, category, image_url, images, barcode,
       attributes, is_promo, is_bestseller, updated_at
     )
     VALUES (
@@ -321,7 +378,8 @@ export async function updateProductFromAdmin(
       ${stock},
       ${update.brand},
       ${update.category},
-      ${update.imageUrl},
+      ${imageUrl},
+      ${JSON.stringify(images)}::jsonb,
       ${barcode},
       ${JSON.stringify(update.attributes)}::jsonb,
       ${update.isPromo},
@@ -335,6 +393,7 @@ export async function updateProductFromAdmin(
       brand         = EXCLUDED.brand,
       category      = EXCLUDED.category,
       image_url     = EXCLUDED.image_url,
+      images        = EXCLUDED.images,
       barcode       = EXCLUDED.barcode,
       attributes    = EXCLUDED.attributes,
       is_promo      = EXCLUDED.is_promo,

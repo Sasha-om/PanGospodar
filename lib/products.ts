@@ -48,12 +48,46 @@ export interface Product {
    * dynamic catalog filters.
    */
   attributes?: Record<string, string>;
+  /** Main photo — used by cards, cart, search results and social previews. */
   imageUrl: string;
+  /**
+   * Extra photos, in display order, shown in the gallery on the product page.
+   * Additive on purpose: `imageUrl` stays the one image every other surface
+   * reads, so nothing outside the gallery has to know this list exists.
+   */
+  images?: string[];
   categorySlug: string;
   /** Admin-set "Акція" marker. Survives every УкрСклад import. */
   isPromo?: boolean;
   /** Admin-set "Топ продажів" marker. */
   isBestseller?: boolean;
+}
+
+/**
+ * How many photos one product may carry, main photo included. A ceiling the
+ * admin form, the API and the database sanitizer all share, so an accidental
+ * multi-select of a hundred files cannot bloat a catalog row.
+ */
+export const MAX_PRODUCT_IMAGES = 8;
+
+/**
+ * Every photo of a product in display order: the main one first, then the
+ * gallery. Empty entries and duplicates are dropped, so callers can treat the
+ * result as a clean list (which is empty only if the product has no photo at
+ * all — database rows always have at least the placeholder).
+ */
+export function getProductImages(product: Product): string[] {
+  const seen = new Set<string>();
+  for (const candidate of [product.imageUrl, ...(product.images ?? [])]) {
+    const url = (candidate ?? "").trim();
+    if (url) {
+      seen.add(url);
+    }
+    if (seen.size >= MAX_PRODUCT_IMAGES) {
+      break;
+    }
+  }
+  return [...seen];
 }
 
 /**
