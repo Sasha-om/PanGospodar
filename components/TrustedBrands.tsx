@@ -1,32 +1,37 @@
 const brands = ["STIHL", "Bosch", "Makita", "DeWalt", "AL-KO"];
 
 /**
- * Solid orange brand band.
+ * Scrolling brand marquee.
  *
- * Deliberately static: the previous version scrolled the list with a CSS
- * marquee, which needed a duplicated list, a fade mask and a hover pause — and
- * still jumped on wide screens, where the doubled list is narrower than the
- * viewport. A wrapping flex row has nothing to go wrong at any width and reads
- * the same on every device.
+ * The list is repeated four times and the track is shifted by exactly -50%, so
+ * the second half lands where the first half started and the loop is seamless.
+ * Four copies rather than two on purpose: two copies of five short words are
+ * narrower than a wide desktop viewport, which used to leave a visible empty
+ * stretch on every pass. The trailing `pr-12` matters as much as the gap — it
+ * gives the last item of a copy the same spacing as every other item, which is
+ * what makes -50% line up.
  */
 export default function TrustedBrands() {
+  const marqueeItems = [...brands, ...brands, ...brands, ...brands];
+
   return (
-    <section className="border-y border-accent-600 bg-accent-500">
+    <section className="border-b border-stone-200">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
-        <p className="text-center text-xs font-semibold uppercase tracking-widest text-white/85">
+        <p className="text-center text-xs font-semibold uppercase tracking-widest text-stone-500">
           Провідні бренди
         </p>
 
-        <ul className="mt-4 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 sm:gap-x-12">
-          {brands.map((brand) => (
-            <li
-              key={brand}
-              className="select-none text-2xl font-black tracking-tight text-white sm:text-3xl"
-            >
-              {brand}
-            </li>
-          ))}
-        </ul>
+        <div className="marquee-mask mt-6 overflow-hidden">
+          <ul className="flex w-max animate-marquee items-center gap-12 pr-12 hover:[animation-play-state:paused]">
+            {marqueeItems.map((brand, index) => (
+              <li key={`${brand}-${index}`} aria-hidden={index >= brands.length}>
+                <span className="select-none text-2xl font-black tracking-tight text-accent-500 transition-colors duration-100 hover:text-accent-600 sm:text-3xl">
+                  {brand}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </section>
   );
