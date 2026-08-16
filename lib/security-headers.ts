@@ -54,15 +54,29 @@ export function buildContentSecurityPolicy(
   nonce: string,
   isDev = process.env.NODE_ENV === "development",
 ): string {
+  /**
+   * The captcha's own host, and only while a site key is configured — an
+   * unconfigured shop never loads that script, so its policy stays as narrow as
+   * it was before Turnstile existed. `frame-src` is what the challenge widget
+   * itself needs; the answer is verified server-to-server, which no browser
+   * policy governs.
+   */
+  const turnstile = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim()
+    ? "https://challenges.cloudflare.com"
+    : "";
+
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    // The host is listed for browsers that ignore 'strict-dynamic'; where it is
+    // honoured, the nonced Next.js runtime loading the script is what counts.
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${turnstile ? ` ${turnstile}` : ""}${isDev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' https: data:",
     "font-src 'self'",
     // The browser talks only to this origin: the catalog API, the Nova Poshta
     // proxy routes and the Server Actions all live under it.
-    `connect-src 'self'${isDev ? " ws: http://localhost:*" : ""}`,
+    `connect-src 'self'${turnstile ? ` ${turnstile}` : ""}${isDev ? " ws: http://localhost:*" : ""}`,
+    `frame-src ${turnstile || "'none'"}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

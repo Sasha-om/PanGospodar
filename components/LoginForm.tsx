@@ -3,18 +3,27 @@
 import { useActionState } from "react";
 import { LockKeyhole } from "lucide-react";
 import { login, type LoginState } from "@/app/actions/auth";
+import TurnstileWidget from "@/components/TurnstileWidget";
 
 const initialState: LoginState = {};
 
 export default function LoginForm({
   from,
   totpEnabled = false,
+  captchaRequired = false,
 }: {
   from?: string;
   /** Whether `ADMIN_TOTP_SECRET` is configured — resolved on the server. */
   totpEnabled?: boolean;
+  /**
+   * Whether this address has already failed often enough to owe a challenge.
+   * Resolved on the server so a reload after several misses shows the widget
+   * immediately, instead of costing one more rejected attempt to learn it.
+   */
+  captchaRequired?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(login, initialState);
+  const showCaptcha = captchaRequired || state.requireCaptcha === true;
 
   return (
     <form
@@ -95,6 +104,8 @@ export default function LoginForm({
           </p>
         </div>
       ) : null}
+
+      {showCaptcha ? <TurnstileWidget /> : null}
 
       {state.error ? (
         <p

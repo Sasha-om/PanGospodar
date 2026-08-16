@@ -4,13 +4,18 @@ import { redirect } from "next/navigation";
 import { hashClientIp } from "@/lib/client-ip";
 import {
   checkLoginRateLimit,
+  guardWithCaptcha,
+  needsCaptcha,
   recordFailedLoginAttempt,
 } from "@/lib/login-rate-limit";
 import { createSession, deleteSession } from "@/lib/session";
 import { isAdminTotpEnabled, verifyAdminTotp } from "@/lib/totp";
+import { TURNSTILE_FIELD } from "@/lib/turnstile";
 
 export interface LoginState {
   error?: string;
+  /** Tells the form to show the challenge on the next attempt. */
+  requireCaptcha?: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -74,6 +79,19 @@ export async function login(
     return { error: limited };
   }
 
+  // Once a few guesses have already missed, credentials alone are no longer
+  // enough — a challenge has to be answered too. Inert unless Turnstile is
+  // configured.
+  const challenge = await guardWithCaptcha(
+    "admin",
+    ipHash,
+    "",
+    String(formData.get(TURNSTILE_FIELD) ?? ""),
+  );
+  if (challenge) {
+    return { error: challenge, requireCaptcha: true };
+  }
+
   // Evaluate both comparisons regardless, so timing does not reveal which failed.
   const userOk = timingSafeEqual(username, expectedUser);
   const passOk = timingSafeEqual(password, expectedPass!);
@@ -90,6 +108,9 @@ export async function login(
       error: isAdminTotpEnabled()
         ? "Невірний логін, пароль або код підтвердження."
         : "Невірний логін або пароль.",
+      // Re-read after recording this failure, so the challenge appears on the
+      // attempt that crosses the threshold rather than one attempt late.
+      requireCaptcha: await needsCaptcha("admin", ipHash),
     };
   }
 

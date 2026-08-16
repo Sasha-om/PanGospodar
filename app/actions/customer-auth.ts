@@ -28,14 +28,19 @@ import {
 } from "@/lib/customers";
 import {
   checkLoginRateLimit,
+  guardWithCaptcha,
   hashAccount,
+  needsCaptcha,
   recordFailedLoginAttempt,
 } from "@/lib/login-rate-limit";
+import { TURNSTILE_FIELD } from "@/lib/turnstile";
 import { normalizePhone } from "@/lib/orders";
 
 export interface AuthState {
   error?: string;
   fieldErrors?: Record<string, string>;
+  /** Tells the form to show the challenge on the next attempt. */
+  requireCaptcha?: boolean;
 }
 
 const DB_DOWN =
@@ -144,6 +149,18 @@ export async function loginCustomer(
     return { error: limited };
   }
 
+  // A stuffing run spread thin enough to stay under both budgets still has to
+  // get past this. Inert unless Turnstile is configured.
+  const challenge = await guardWithCaptcha(
+    "customer",
+    ipHash,
+    accountHash,
+    String(formData.get(TURNSTILE_FIELD) ?? ""),
+  );
+  if (challenge) {
+    return { error: challenge, requireCaptcha: true };
+  }
+
   let customerId: number;
   try {
     await ensureCustomersSchema();
@@ -156,7 +173,10 @@ export async function loginCustomer(
 
     if (!customer || !ok) {
       await recordFailedLoginAttempt("customer", ipHash, accountHash);
-      return { error: "Невірний email або пароль." };
+      return {
+        error: "Невірний email або пароль.",
+        requireCaptcha: await needsCaptcha("customer", ipHash, accountHash),
+      };
     }
     customerId = customer.id;
     await mergeFavorites(customerId, guestFavorites);

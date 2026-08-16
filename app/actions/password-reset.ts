@@ -33,9 +33,12 @@ import {
 } from "@/lib/customers";
 import {
   checkLoginRateLimit,
+  guardWithCaptcha,
   hashAccount,
+  needsCaptcha,
   recordFailedLoginAttempt,
 } from "@/lib/login-rate-limit";
+import { TURNSTILE_FIELD } from "@/lib/turnstile";
 import {
   isPasswordResetEmailConfigured,
   sendPasswordResetEmail,
@@ -52,6 +55,8 @@ export interface ResetRequestState {
   error?: string;
   /** Set once the request was accepted — the form swaps to a confirmation. */
   sent?: boolean;
+  /** Tells the form to show the challenge on the next attempt. */
+  requireCaptcha?: boolean;
 }
 
 export interface ResetPasswordState {
@@ -93,6 +98,19 @@ export async function requestPasswordReset(
   if (limited) {
     return { error: limited };
   }
+
+  // Sending mail on someone else's behalf is worth a challenge sooner than a
+  // login is. Inert unless Turnstile is configured.
+  const challenge = await guardWithCaptcha(
+    "reset",
+    ipHash,
+    accountHash,
+    String(formData.get(TURNSTILE_FIELD) ?? ""),
+  );
+  if (challenge) {
+    return { error: challenge, requireCaptcha: true };
+  }
+
   // Every request counts, not just failed ones: the budget here is about how
   // much mail may be triggered, not about how many guesses were wrong.
   await recordFailedLoginAttempt("reset", ipHash, accountHash);
@@ -115,7 +133,10 @@ export async function requestPasswordReset(
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught);
     console.error(`[password-reset] Request failed: ${message}`);
-    return { error: "Не вдалося обробити запит. Спробуйте ще раз." };
+    return {
+      error: "Не вдалося обробити запит. Спробуйте ще раз.",
+      requireCaptcha: await needsCaptcha("reset", ipHash, accountHash),
+    };
   }
 
   return { sent: true, error: undefined };

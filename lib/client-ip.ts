@@ -29,6 +29,24 @@ function firstAddress(value: string | null): string {
 }
 
 /**
+ * The caller's address, or `""` when none of the headers above carry one.
+ *
+ * Almost every caller wants `hashClientIp` instead — the raw value is for the
+ * one case that must send it onward rather than store it: Cloudflare's
+ * siteverify uses it to notice a challenge token replayed from somewhere else.
+ */
+export async function readClientIp(): Promise<string> {
+  const headerList = await headers();
+  for (const header of IP_HEADERS) {
+    const ip = firstAddress(headerList.get(header));
+    if (ip) {
+      return ip;
+    }
+  }
+  return "";
+}
+
+/**
  * Hash the caller's IP so a per-IP counter (login attempts, order limits) can
  * recognise a repeat caller without the database ever holding a real address.
  *
@@ -41,15 +59,7 @@ function firstAddress(value: string | null): string {
  * shared bucket.
  */
 export async function hashClientIp(fallbackSalt: string): Promise<string> {
-  const headerList = await headers();
-
-  let ip = "";
-  for (const header of IP_HEADERS) {
-    ip = firstAddress(headerList.get(header));
-    if (ip) {
-      break;
-    }
-  }
+  const ip = await readClientIp();
   if (!ip) {
     return "";
   }

@@ -7,6 +7,7 @@ import {
   requestPasswordReset,
   type ResetRequestState,
 } from "@/app/actions/password-reset";
+import TurnstileWidget from "@/components/TurnstileWidget";
 
 const initialState: ResetRequestState = {};
 
@@ -17,11 +18,17 @@ const initialState: ResetRequestState = {};
  * same for a registered and an unregistered address, and the copy must not
  * quietly undo that by promising mail that is not coming.
  */
-export default function ForgotPasswordForm() {
+export default function ForgotPasswordForm({
+  captchaRequired = false,
+}: {
+  /** Whether this address has already asked often enough to owe a challenge. */
+  captchaRequired?: boolean;
+}) {
   const [state, formAction, pending] = useActionState(
     requestPasswordReset,
     initialState,
   );
+  const showCaptcha = captchaRequired || state.requireCaptcha === true;
 
   if (state.sent) {
     return (
@@ -74,6 +81,8 @@ export default function ForgotPasswordForm() {
           className="w-full rounded-sm border border-stone-300 px-3 py-2 text-sm text-stone-800 focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500/40"
         />
       </div>
+
+      {showCaptcha ? <TurnstileWidget /> : null}
 
       {state.error ? (
         <p

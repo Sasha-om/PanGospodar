@@ -7,6 +7,7 @@ import {
   registerCustomer,
   type AuthState,
 } from "@/app/actions/customer-auth";
+import TurnstileWidget from "@/components/TurnstileWidget";
 import { readGuestFavorites } from "@/context/FavoritesContext";
 
 const initialState: AuthState = {};
@@ -30,9 +31,16 @@ function FieldError({ message }: { message?: string }) {
 export default function AuthForm({
   mode,
   from,
+  captchaRequired = false,
 }: {
   mode: "login" | "register";
   from?: string;
+  /**
+   * Whether this address has already failed often enough to owe a challenge.
+   * Resolved on the server, so a reload after several misses shows the widget
+   * immediately rather than costing one more rejected attempt.
+   */
+  captchaRequired?: boolean;
 }) {
   const isRegister = mode === "register";
   const [state, formAction, pending] = useActionState(
@@ -41,6 +49,11 @@ export default function AuthForm({
   );
   const [favorites, setFavorites] = useState("[]");
   const errors = state.fieldErrors ?? {};
+  // Registration never asks for one: there is nothing to guess, and the
+  // throttles that matter there are the database's own unique-email index and
+  // the order limits further down the funnel.
+  const showCaptcha =
+    !isRegister && (captchaRequired || state.requireCaptcha === true);
 
   // Read after mount: the server rendered an empty list, so touching
   // localStorage during render would produce a hydration mismatch. Adopting
@@ -138,6 +151,8 @@ export default function AuthForm({
         )}
         <FieldError message={errors.password} />
       </div>
+
+      {showCaptcha ? <TurnstileWidget /> : null}
 
       {state.error ? (
         <p
