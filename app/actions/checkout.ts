@@ -1,7 +1,7 @@
 "use server";
 
 import {
-  parseItems,
+  buildLinesFromCatalog,
   saveAndNotify,
   type OrderFormState,
 } from "@/lib/order-intake";
@@ -38,7 +38,9 @@ export async function submitOrder(
   const warehouse = text("warehouse");
   const paymentMethod = text("paymentMethod");
   const comment = text("comment");
-  const items = parseItems(String(formData.get("items") ?? "[]"));
+  // Only sku/quantity come from the browser; name and price are resolved from
+  // the live catalog below, so an edited hidden field cannot set its own price.
+  const items = await buildLinesFromCatalog(String(formData.get("items") ?? "[]"));
 
   const fieldErrors: Record<string, string> = {};
 

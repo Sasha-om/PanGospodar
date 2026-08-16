@@ -206,6 +206,39 @@ export default function CatalogBrowser({
   );
 
   /**
+   * The single category the customer is looking at, or `null` for "Усі
+   * категорії".
+   *
+   * Four ways to end up in one: the page itself is a category page, the URL
+   * carries `?category=`, the mega-menu picked a subcategory (which belongs to
+   * exactly one category), or the customer ticked exactly one category box.
+   */
+  const activeCategory =
+    categorySlug ??
+    categoryParam ??
+    subcategory?.categorySlug ??
+    (selectedCategories.length === 1 ? selectedCategories[0] : null);
+
+  /**
+   * Products the characteristic filters are built from: only ever a single
+   * category's worth.
+   *
+   * Across the whole catalogue those filters are noise — "Крок ланцюга" and
+   * "Робочий об'єм" are meaningless next to hand tools, and the sidebar turns
+   * into a list of dozens of groups that each match a handful of products. So
+   * they appear only once the scope is one category, where they are exactly
+   * what a shopper wants.
+   */
+  const attributeScope = useMemo(() => {
+    if (!activeCategory) {
+      return [];
+    }
+    return scopedProducts.filter(
+      (product) => product.categorySlug === activeCategory,
+    );
+  }, [scopedProducts, activeCategory]);
+
+  /**
    * Attribute filter groups, built from the characteristics that actually occur
    * in the scoped products. Nothing is hardcoded — a new characteristic added
    * in the admin panel becomes a filter automatically.
@@ -215,7 +248,7 @@ export default function CatalogBrowser({
     // `getProductAttributes` returns one entry per label, so a product can
     // only increment it once.
     const byLabel = new Map<string, { values: Set<string>; count: number }>();
-    for (const product of scopedProducts) {
+    for (const product of attributeScope) {
       for (const [label, value] of getProductAttributes(product)) {
         const bucket = byLabel.get(label) ?? { values: new Set<string>(), count: 0 };
         bucket.values.add(value);
@@ -223,7 +256,7 @@ export default function CatalogBrowser({
         byLabel.set(label, bucket);
       }
     }
-    const total = scopedProducts.length;
+    const total = attributeScope.length;
     return (
       [...byLabel.entries()]
         /**
@@ -246,12 +279,27 @@ export default function CatalogBrowser({
           options: toOptions([...values]),
         }))
     );
-  }, [scopedProducts]);
+  }, [attributeScope]);
 
   // Selected attribute values, keyed by characteristic label.
   const [selectedAttributes, setSelectedAttributes] = useState<
     Record<string, string[]>
   >({});
+
+  /**
+   * Drop the characteristic selections when the category changes.
+   *
+   * Without this a filter the customer can no longer see keeps narrowing the
+   * results — switch from "Бензопили" back to "Усі категорії" and the
+   * catalogue would silently still be limited to a chain pitch, with nothing
+   * on screen to explain why.
+   */
+  const [syncedAttributeCategory, setSyncedAttributeCategory] =
+    useState(activeCategory);
+  if (activeCategory !== syncedAttributeCategory) {
+    setSyncedAttributeCategory(activeCategory);
+    setSelectedAttributes({});
+  }
 
   function toggleAttribute(label: string, value: string) {
     setSelectedAttributes((prev) => {
@@ -496,16 +544,27 @@ export default function CatalogBrowser({
           </div>
         </fieldset>
 
-        {/* Characteristic filters, generated from the products in scope. */}
-        {attributeGroups.map((group) => (
-          <FilterGroup
-            key={group.label}
-            legend={group.label}
-            options={group.options}
-            selected={selectedAttributes[group.label] ?? []}
-            onToggle={(value) => toggleAttribute(group.label, value)}
-          />
-        ))}
+        {/*
+          Characteristic filters, generated from the products of the active
+          category. On "Усі категорії" there is no such category, so instead of
+          an unusable pile of groups the sidebar says how to get them.
+        */}
+        {activeCategory ? (
+          attributeGroups.map((group) => (
+            <FilterGroup
+              key={group.label}
+              legend={group.label}
+              options={group.options}
+              selected={selectedAttributes[group.label] ?? []}
+              onToggle={(value) => toggleAttribute(group.label, value)}
+            />
+          ))
+        ) : (
+          <p className="border-t border-stone-200 pt-4 text-xs text-stone-500">
+            Оберіть категорію, щоб фільтрувати за характеристиками —
+            потужністю, робочим об&apos;ємом, кроком ланцюга тощо.
+          </p>
+        )}
       </aside>
 
       <div>

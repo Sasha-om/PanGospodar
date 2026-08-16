@@ -6,7 +6,14 @@ import { login, type LoginState } from "@/app/actions/auth";
 
 const initialState: LoginState = {};
 
-export default function LoginForm({ from }: { from?: string }) {
+export default function LoginForm({
+  from,
+  totpEnabled = false,
+}: {
+  from?: string;
+  /** Whether `ADMIN_TOTP_SECRET` is configured — resolved on the server. */
+  totpEnabled?: boolean;
+}) {
   const [state, formAction, pending] = useActionState(login, initialState);
 
   return (
@@ -62,6 +69,32 @@ export default function LoginForm({ from }: { from?: string }) {
           className="rounded-sm border border-stone-200 px-3 py-2.5 text-sm text-stone-800 focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/30"
         />
       </div>
+
+      {totpEnabled ? (
+        <div className="flex flex-col gap-1.5">
+          <label
+            htmlFor="code"
+            className="text-xs font-semibold uppercase tracking-wide text-stone-600"
+          >
+            Код підтвердження
+          </label>
+          <input
+            id="code"
+            name="code"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={6}
+            autoComplete="one-time-code"
+            required
+            placeholder="123456"
+            className="rounded-sm border border-stone-200 px-3 py-2.5 text-sm tracking-widest text-stone-800 focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/30"
+          />
+          <p className="text-xs text-stone-500">
+            Шестизначний код із застосунку-автентифікатора.
+          </p>
+        </div>
+      ) : null}
 
       {state.error ? (
         <p

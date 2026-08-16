@@ -43,6 +43,13 @@ export default async function ProductPage({
     label,
     value,
   }));
+  // The `description` column — written by the admin or by
+  // scripts/generate-descriptions.ts — split into paragraphs so multi-line copy
+  // does not collapse into one wall of text.
+  const descriptionParagraphs = product.shortDescription
+    .split(/\n\s*\n|\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
 
   // Real baskets first; the rules in `findBoughtTogether` fill the rest. The
   // lookup never throws — an empty list simply means "no history yet".
@@ -81,13 +88,13 @@ export default async function ProductPage({
       </div>
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 pb-16 sm:px-6">
-        <div className="grid grid-cols-1 gap-10 lg:grid-cols-2">
+        <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-2">
           <ProductGallery
             images={getProductImages(product)}
             alt={product.name}
           />
 
-          <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-5">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-stone-500">
                 Код: {product.sku ?? product.id}
@@ -112,9 +119,14 @@ export default async function ProductPage({
                   />
                 </a>
               ) : null}
-              {product.shortDescription ? (
-                <p className="mt-3 text-base text-stone-600">
-                  {product.shortDescription}
+              {/*
+                Only the opening sentence sits next to the buy buttons — the
+                rest of the copy has its own section under the fold, so the
+                purchase block stays short enough to read at a glance.
+              */}
+              {descriptionParagraphs[0] ? (
+                <p className="mt-3 line-clamp-3 text-base text-stone-600">
+                  {descriptionParagraphs[0]}
                 </p>
               ) : null}
             </div>
@@ -143,33 +155,6 @@ export default async function ProductPage({
                   : "Немає в наявності"}
               </span>
             </div>
-
-            {specRows.length > 0 ? (
-              <div className="overflow-hidden rounded-sm border border-stone-200">
-                <div className="bg-stone-950 px-4 py-3">
-                  <h2 className="text-sm font-bold uppercase tracking-wide text-white">
-                    Технічні характеристики
-                  </h2>
-                </div>
-                <table className="w-full border-collapse text-sm">
-                  <tbody>
-                    {specRows.map((row, index) => (
-                      <tr
-                        key={row.label}
-                        className={index % 2 === 0 ? "bg-white" : "bg-stone-50"}
-                      >
-                        <th className="w-1/2 border-b border-stone-200 px-4 py-3 text-left font-semibold text-stone-700">
-                          {row.label}
-                        </th>
-                        <td className="border-b border-stone-200 px-4 py-3 font-bold text-accent-600">
-                          {row.value}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
 
             <div className="flex flex-col gap-3">
               <ProductOrderActions
@@ -206,6 +191,64 @@ export default async function ProductPage({
             ) : null}
           </div>
         </div>
+
+        {/*
+          Description and characteristics, side by side under the purchase
+          block. Both used to live in the right-hand column, where a long spec
+          table pushed "Купити" far below the photo; down here they can be as
+          long as they need to be. Each half is dropped entirely when the
+          product has nothing to show, and the survivor spans the full width.
+        */}
+        {descriptionParagraphs.length > 0 || specRows.length > 0 ? (
+          <div className="mt-10 grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
+            {descriptionParagraphs.length > 0 ? (
+              <section className="rounded-sm border border-stone-200 bg-white">
+                <div className="border-b border-stone-200 px-5 py-3">
+                  <h2 className="text-sm font-bold uppercase tracking-wide text-stone-800">
+                    Опис
+                  </h2>
+                </div>
+                <div className="flex flex-col gap-3 px-5 py-4">
+                  {descriptionParagraphs.map((paragraph) => (
+                    <p
+                      key={paragraph}
+                      className="text-base leading-relaxed text-stone-700"
+                    >
+                      {paragraph}
+                    </p>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {specRows.length > 0 ? (
+              <section className="overflow-hidden rounded-sm border border-stone-200">
+                <div className="bg-stone-950 px-5 py-3">
+                  <h2 className="text-sm font-bold uppercase tracking-wide text-white">
+                    Технічні характеристики
+                  </h2>
+                </div>
+                <table className="w-full border-collapse text-sm">
+                  <tbody>
+                    {specRows.map((row, index) => (
+                      <tr
+                        key={row.label}
+                        className={index % 2 === 0 ? "bg-white" : "bg-stone-50"}
+                      >
+                        <th className="w-1/2 border-b border-stone-200 px-5 py-2.5 text-left font-semibold text-stone-700">
+                          {row.label}
+                        </th>
+                        <td className="border-b border-stone-200 px-5 py-2.5 font-bold text-accent-600">
+                          {row.value}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            ) : null}
+          </div>
+        ) : null}
 
         <ProductReviews
           productId={product.id}

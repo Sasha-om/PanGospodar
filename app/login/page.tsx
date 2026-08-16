@@ -1,5 +1,6 @@
 import PageHeader from "@/components/PageHeader";
 import LoginForm from "@/components/LoginForm";
+import { isAdminTotpEnabled } from "@/lib/totp";
 
 export default async function LoginPage({
   searchParams,
@@ -18,7 +19,7 @@ export default async function LoginPage({
 
       <main className="mx-auto flex w-full max-w-md flex-1 items-start px-4 py-12 sm:px-6">
         <div className="w-full">
-          <LoginForm from={safeFrom} />
+          <LoginForm from={safeFrom} totpEnabled={isAdminTotpEnabled()} />
         </div>
       </main>
     </div>

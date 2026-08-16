@@ -8,9 +8,11 @@
  */
 
 import { loadProducts } from "@/lib/catalog";
+import { hashClientIp } from "@/lib/client-ip";
 import { getCustomerId } from "@/lib/customer-session";
 import {
   claimOrderForCustomer,
+  countRecentOrdersByIp,
   createOrder,
   ensureCustomersSchema,
   ensureStockSchema,
@@ -33,13 +35,39 @@ export interface OrderFormState {
   fieldErrors?: Record<string, string>;
 }
 
+/**
+ * `createOrder` reserves real stock the instant an order lands, for every
+ * status but CANCELLED — so unlike a login guess, one "attempt" here has an
+ * immediate cost (a shelf quantity, a Telegram/email notification). 5 orders
+ * per 10 minutes per IP covers a real shopper retrying after a stock/field
+ * error or buying twice in one visit, and blocks a script from emptying a
+ * low-stock item or flooding the seller's notifications.
+ */
+const ORDER_RATE_LIMIT = { maxOrders: 5, windowMinutes: 10 } as const;
+
+const TOO_MANY_ORDERS =
+  "Забагато замовлень з цієї адреси за короткий час. Спробуйте пізніше або зателефонуйте нам.";
+
 /** Upper bound on a single line, so a typo cannot reserve the whole shelf. */
 export const MAX_QUANTITY = 999;
 
 const MAX_ITEMS = 200;
 
-/** Cart items come from the browser, so prices/quantities are re-validated. */
-export function parseItems(raw: string): OrderItem[] {
+/** A cart line exactly as the browser is trusted to report it: which product, how many. */
+interface RawCartLine {
+  sku: string;
+  quantity: number;
+}
+
+/**
+ * Parse the cart snapshot's shape, trusting only `sku`/`id` and `quantity`.
+ *
+ * Any `price`/`name` the browser sends is ignored here on purpose — those are
+ * exactly the fields an edited hidden field or a hand-crafted request could
+ * tamper with, and `buildLinesFromCatalog` re-resolves both from the server's
+ * own catalog below.
+ */
+function parseCartLines(raw: string): RawCartLine[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -54,16 +82,49 @@ export function parseItems(raw: string): OrderItem[] {
     .slice(0, MAX_ITEMS)
     .map((entry) => {
       const item = (entry ?? {}) as Record<string, unknown>;
-      const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
-      const price = Math.max(0, Number(item.price) || 0);
-      return {
-        sku: String(item.sku ?? item.id ?? "").trim(),
-        name: String(item.name ?? "").trim(),
-        price,
-        quantity,
-      };
+      const quantity = Math.min(
+        MAX_QUANTITY,
+        Math.max(1, Math.round(Number(item.quantity) || 0)),
+      );
+      const sku = String(item.sku ?? item.id ?? "").trim();
+      return { sku, quantity };
     })
-    .filter((item) => item.name && item.quantity > 0);
+    .filter((line) => line.sku && line.quantity > 0);
+}
+
+/**
+ * Resolve a cart checkout's line items straight from the catalog.
+ *
+ * The browser sends only which SKUs and how many: name and price are read
+ * server-side, exactly like `buildLineFromCatalog` below, so a tampered cart
+ * snapshot cannot check out a chainsaw at 1 ₴. A SKU that no longer exists in
+ * the catalog (deleted or renamed since it was added to the cart) is dropped
+ * rather than trusted — the caller sees a shorter list, never a fabricated one.
+ */
+export async function buildLinesFromCatalog(raw: string): Promise<OrderItem[]> {
+  const lines = parseCartLines(raw);
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const { products } = await loadProducts();
+  const bySku = new Map(products.map((product) => [product.sku ?? product.id, product]));
+  const byId = new Map(products.map((product) => [product.id, product]));
+
+  const items: OrderItem[] = [];
+  for (const line of lines) {
+    const product = bySku.get(line.sku) ?? byId.get(line.sku);
+    if (!product) {
+      continue;
+    }
+    items.push({
+      sku: product.sku ?? product.id,
+      name: product.name,
+      price: product.price,
+      quantity: line.quantity,
+    });
+  }
+  return items;
 }
 
 export function parseQuantity(raw: string): number | null {
@@ -119,10 +180,32 @@ export async function saveAndNotify(
     };
   }
 
+  const ipHash = await hashClientIp("panhospodar-checkout");
+
   try {
     // Also installs the stock guard the deduction relies on.
     await ensureStockSchema();
-    const order = await createOrder(input);
+
+    // Checked before the write: a flood of orders costs real stock the moment
+    // it lands, so this has to stop the request, not just log it afterwards.
+    // Fails open — a rate-limit query error must never be why a real
+    // customer's order is refused.
+    if (ipHash) {
+      try {
+        const recent = await countRecentOrdersByIp(
+          ipHash,
+          ORDER_RATE_LIMIT.windowMinutes,
+        );
+        if (recent >= ORDER_RATE_LIMIT.maxOrders) {
+          return { error: TOO_MANY_ORDERS };
+        }
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : String(caught);
+        console.error(`[${logTag}] Order rate-limit check failed: ${message}`);
+      }
+    }
+
+    const order = await createOrder(input, ipHash);
 
     // Attach the order to the account when one is signed in, so it stays in
     // the customer's history even if they later change email or phone. Never

@@ -456,6 +456,18 @@ export async function ensureOrdersTable(): Promise<void> {
     CREATE INDEX IF NOT EXISTS orders_items_gin_idx
     ON orders USING gin (items jsonb_path_ops)
   `;
+  // Salted hash of the submitter's IP — never a real address — purely so
+  // `countRecentOrdersByIp` can throttle a script that floods orders to drain
+  // stock or spam the seller's Telegram/email. Empty for rows written before
+  // this column existed, or when there was no address to key on.
+  await sql`
+    ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS ip_hash text NOT NULL DEFAULT ''
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS orders_ip_hash_created_idx
+    ON orders (ip_hash, created_at DESC)
+  `;
 }
 
 interface OrderRow {
@@ -613,8 +625,17 @@ export async function findStockShortages(
   }));
 }
 
-/** Insert a new order and reserve its quantities, both or neither. */
-export async function createOrder(input: OrderInput): Promise<Order> {
+/**
+ * Insert a new order and reserve its quantities, both or neither.
+ *
+ * `ipHash` is bookkeeping only — a salted digest, never stored anywhere else
+ * on the order, never returned by `rowToOrder` — used solely so
+ * `countRecentOrdersByIp` can throttle a flood of orders from one caller.
+ */
+export async function createOrder(
+  input: OrderInput,
+  ipHash = "",
+): Promise<Order> {
   const sql = getSql();
   const lines = toStockLines(input.items);
 
@@ -623,7 +644,8 @@ export async function createOrder(input: OrderInput): Promise<Order> {
   const insert = () => sql`
     INSERT INTO orders (
       status, type, first_name, last_name, phone, email, contact_channel,
-      city, warehouse, payment_method, comment, items, total, stock_applied
+      city, warehouse, payment_method, comment, items, total, stock_applied,
+      ip_hash
     ) VALUES (
       'NEW',
       ${input.type},
@@ -638,7 +660,8 @@ export async function createOrder(input: OrderInput): Promise<Order> {
       ${input.comment},
       ${JSON.stringify(input.items)}::jsonb,
       ${input.total},
-      ${lines.length > 0}
+      ${lines.length > 0},
+      ${ipHash}
     )
     RETURNING *
   `;
@@ -670,6 +693,36 @@ export async function createOrder(input: OrderInput): Promise<Order> {
   }
 
   return rowToOrder(rows[0]);
+}
+
+/**
+ * How many orders this IP has submitted recently, across the cart checkout,
+ * "Купити" and "Зарезервувати" alike — they all end up here via `createOrder`.
+ * Every status counts, cancelled included: a script flooding orders to drain
+ * stock or spam notifications still used up its budget even if an admin later
+ * cancels the mess.
+ */
+export async function countRecentOrdersByIp(
+  ipHash: string,
+  withinMinutes: number,
+): Promise<number> {
+  const sql = getSql();
+  const run = async () =>
+    (await sql`
+      SELECT count(*)::int AS n
+      FROM orders
+      WHERE ip_hash = ${ipHash}
+        AND ip_hash <> ''
+        AND created_at > now() - make_interval(mins => ${withinMinutes})
+    `) as { n: number }[];
+
+  try {
+    return (await run())[0]?.n ?? 0;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureOrdersTable();
+    return 0;
+  }
 }
 
 /**
@@ -1452,6 +1505,24 @@ export async function ensureCustomersTable(): Promise<void> {
   await sql`
     CREATE INDEX IF NOT EXISTS orders_customer_idx ON orders (customer_id)
   `;
+  // Password reset tickets. `token_hash` is a SHA-256 of the value that went
+  // out by email and is the primary key: the raw token exists only in that one
+  // message, so a leak of this table hands an attacker nothing usable — the
+  // same reasoning as storing password hashes rather than passwords.
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      token_hash  text PRIMARY KEY,
+      customer_id integer NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      expires_at  timestamptz NOT NULL,
+      used_at     timestamptz,
+      created_at  timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  // Every lookup is by token; this index is for the sweep of dead rows.
+  await sql`
+    CREATE INDEX IF NOT EXISTS password_resets_expires_idx
+    ON password_resets (expires_at)
+  `;
 }
 
 let customersSchemaReady: Promise<void> | null = null;
@@ -1591,6 +1662,96 @@ export async function updateCustomerContact(
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
   }
+}
+
+/* --------------------------- password resets ------------------------------ */
+
+/**
+ * Issue a reset ticket for `customerId`, valid until `expiresAt`.
+ *
+ * Any ticket that customer already had is dropped first, so a stack of old
+ * emails cannot each open the account — the most recent request is the only
+ * one that works. Also sweeps expired rows for everybody: this path runs rarely
+ * enough that the extra statement costs nothing, and it saves a cron job.
+ */
+export async function createPasswordReset(
+  customerId: number,
+  tokenHash: string,
+  expiresAt: Date,
+): Promise<void> {
+  const sql = getSql();
+  await sql`DELETE FROM password_resets WHERE customer_id = ${customerId}`;
+  await sql`DELETE FROM password_resets WHERE expires_at < now()`;
+  await sql`
+    INSERT INTO password_resets (token_hash, customer_id, expires_at)
+    VALUES (${tokenHash}, ${customerId}, ${expiresAt.toISOString()})
+  `;
+}
+
+/**
+ * The customer a live reset token belongs to, or `null`.
+ *
+ * "Live" means: exists, not past its expiry, and not already used. Every
+ * failure mode collapses to `null` on purpose — the page it feeds must not be
+ * able to tell an expired ticket from a forged one.
+ */
+export async function findPasswordReset(
+  tokenHash: string,
+): Promise<number | null> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT customer_id
+      FROM password_resets
+      WHERE token_hash = ${tokenHash}
+        AND used_at IS NULL
+        AND expires_at > now()
+      LIMIT 1
+    `) as { customer_id: number }[];
+    return rows[0]?.customer_id ?? null;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    return null;
+  }
+}
+
+/**
+ * Set a new password and burn the ticket, both or neither.
+ *
+ * The `used_at IS NULL` guard inside the transaction is what makes a token
+ * single-use even if two requests arrive at once: the second one updates no
+ * row, sees a zero count and is rejected.
+ *
+ * Returns the customer whose password was changed, or `null` if the ticket was
+ * not usable.
+ */
+export async function consumePasswordReset(
+  tokenHash: string,
+  passwordHash: string,
+): Promise<number | null> {
+  const sql = getSql();
+  // One statement, not two: the data-modifying CTE claims the ticket and the
+  // outer UPDATE only ever runs for a ticket that was actually claimed. Two
+  // separate statements could not express this — the second would have to
+  // re-find a row the first had just marked used.
+  const rows = (await sql`
+    WITH claimed AS (
+      UPDATE password_resets
+      SET used_at = now()
+      WHERE token_hash = ${tokenHash}
+        AND used_at IS NULL
+        AND expires_at > now()
+      RETURNING customer_id
+    )
+    UPDATE customers
+    SET password_hash = ${passwordHash}
+    FROM claimed
+    WHERE customers.id = claimed.customer_id
+    RETURNING customers.id
+  `) as { id: number }[];
+
+  return rows[0]?.id ?? null;
 }
 
 /* ------------------------------ favorites -------------------------------- */
@@ -2037,5 +2198,132 @@ export async function loadAdminFacets(): Promise<AdminFacets> {
     if (!isMissingSchemaError(caught)) throw caught;
     await ensureProductsTable();
     return run();
+  }
+}
+
+/* ------------------------------ login attempts ----------------------------- */
+
+/**
+ * Failed logins, keyed by a salted hash of the caller's IP and which login this
+ * was against — `"admin"` (`app/actions/auth.ts`), `"customer"`
+ * (`app/actions/customer-auth.ts`) or `"reset"` (password-reset requests, which
+ * are throttled the same way so nobody can flood a customer's inbox). One
+ * shared table, scoped by that column, so a flood against one never eats into
+ * another's budget.
+ *
+ * Neither login strictly needs a database to function — the admin one reads
+ * only environment variables, and a missing customer table just means "no
+ * such account" — so this table exists purely to slow down a scripted brute
+ * force. Both call sites skip these checks entirely when there is no database
+ * configured; the login still works, it just loses this extra layer.
+ */
+export type LoginScope = "admin" | "customer" | "reset";
+
+export async function ensureLoginAttemptsTable(): Promise<void> {
+  const sql = getSql();
+  await sql`
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      id         serial PRIMARY KEY,
+      scope      text NOT NULL,
+      ip_hash    text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )
+  `;
+  // Which *account* was guessed at, as a salted hash of the email. A per-IP
+  // budget alone is blind to the attack that actually matters here: credential
+  // stuffing driven from a botnet, where every request carries a fresh address
+  // but always targets the same handful of accounts. Empty for the admin login,
+  // which has one account by definition.
+  await sql`
+    ALTER TABLE login_attempts
+    ADD COLUMN IF NOT EXISTS account_hash text NOT NULL DEFAULT ''
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS login_attempts_scope_ip_idx
+    ON login_attempts (scope, ip_hash, created_at DESC)
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS login_attempts_scope_account_idx
+    ON login_attempts (scope, account_hash, created_at DESC)
+  `;
+}
+
+let loginAttemptsSchemaReady: Promise<void> | null = null;
+
+/** Memoized per process — the DDL is idempotent but costs a round trip. */
+export function ensureLoginAttemptsSchema(): Promise<void> {
+  loginAttemptsSchemaReady ??= ensureLoginAttemptsTable().catch((error: unknown) => {
+    loginAttemptsSchemaReady = null;
+    throw error;
+  });
+  return loginAttemptsSchemaReady;
+}
+
+/** How many failed attempts this IP has made recently against this login. */
+export async function countRecentLoginAttempts(
+  scope: LoginScope,
+  ipHash: string,
+  withinMinutes: number,
+): Promise<number> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+    FROM login_attempts
+    WHERE scope = ${scope}
+      AND ip_hash = ${ipHash}
+      AND created_at > now() - make_interval(mins => ${withinMinutes})
+  `) as { n: number }[];
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * How many failed attempts this *account* has collected recently, from any
+ * address. Deliberately a wider window and a larger allowance than the per-IP
+ * budget (see `lib/login-rate-limit.ts`): this one exists to stop a slow,
+ * distributed grind, not to punish someone who mistyped their password twice
+ * from two devices.
+ */
+export async function countRecentAccountLoginAttempts(
+  scope: LoginScope,
+  accountHash: string,
+  withinMinutes: number,
+): Promise<number> {
+  const sql = getSql();
+  const rows = (await sql`
+    SELECT count(*)::int AS n
+    FROM login_attempts
+    WHERE scope = ${scope}
+      AND account_hash = ${accountHash}
+      AND account_hash <> ''
+      AND created_at > now() - make_interval(mins => ${withinMinutes})
+  `) as { n: number }[];
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * Record one failed login attempt.
+ *
+ * Occasionally sweeps the table on the way out. Nothing here is of any value
+ * once its window has passed, and this is the only write path, so a
+ * probabilistic purge keeps the table small without a scheduled job.
+ */
+export async function recordFailedLogin(
+  scope: LoginScope,
+  ipHash: string,
+  accountHash = "",
+): Promise<void> {
+  const sql = getSql();
+  await sql`
+    INSERT INTO login_attempts (scope, ip_hash, account_hash)
+    VALUES (${scope}, ${ipHash}, ${accountHash})
+  `;
+
+  if (Math.random() < 0.02) {
+    try {
+      await sql`DELETE FROM login_attempts WHERE created_at < now() - interval '1 day'`;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      console.error(`[db] login_attempts cleanup failed: ${message}`);
+    }
   }
 }

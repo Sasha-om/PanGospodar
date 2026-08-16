@@ -23,6 +23,22 @@ export const CUSTOMER_COOKIE = "panh_customer";
 
 export type SessionRole = "admin" | "customer";
 
+/**
+ * How long a customer stays signed in. Shoppers return infrequently; an
+ * admin-style short expiry would just annoy them.
+ *
+ * Lives here rather than in `lib/customer-session.ts` so `proxy.ts` can read it
+ * without pulling in `next/headers`.
+ */
+export const CUSTOMER_SESSION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * How much of that lifetime may be spent before the proxy issues a fresh
+ * cookie. A shopper who visits at least once every 25 days therefore never
+ * meets the hard expiry, while a cookie left untouched still dies on schedule.
+ */
+export const CUSTOMER_RENEW_AFTER_MS = 5 * 24 * 60 * 60 * 1000; // 5 days
+
 export interface SessionPayload {
   /** Subject — the admin username, or the customer's numeric id as a string. */
   sub: string;

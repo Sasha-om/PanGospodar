@@ -1,7 +1,13 @@
 "use server";
 
 import { redirect } from "next/navigation";
+import { hashClientIp } from "@/lib/client-ip";
+import {
+  checkLoginRateLimit,
+  recordFailedLoginAttempt,
+} from "@/lib/login-rate-limit";
 import { createSession, deleteSession } from "@/lib/session";
+import { isAdminTotpEnabled, verifyAdminTotp } from "@/lib/totp";
 
 export interface LoginState {
   error?: string;
@@ -60,11 +66,31 @@ export async function login(
     };
   }
 
+  // Checked before the password itself: a scripted brute force gets a flat
+  // "try later" long before its guesses matter.
+  const ipHash = await hashClientIp("panhospodar-admin-login");
+  const limited = await checkLoginRateLimit("admin", ipHash);
+  if (limited) {
+    return { error: limited };
+  }
+
   // Evaluate both comparisons regardless, so timing does not reveal which failed.
   const userOk = timingSafeEqual(username, expectedUser);
   const passOk = timingSafeEqual(password, expectedPass!);
-  if (!userOk || !passOk) {
-    return { error: "Невірний логін або пароль." };
+  // The second factor, when configured, is checked in the same breath as the
+  // password and reported with the same wording: an attacker holding a stolen
+  // password learns nothing about whether it was the right one.
+  const totpOk = isAdminTotpEnabled()
+    ? verifyAdminTotp(String(formData.get("code") ?? ""))
+    : true;
+
+  if (!userOk || !passOk || !totpOk) {
+    await recordFailedLoginAttempt("admin", ipHash);
+    return {
+      error: isAdminTotpEnabled()
+        ? "Невірний логін, пароль або код підтвердження."
+        : "Невірний логін або пароль.",
+    };
   }
 
   await createSession(username);

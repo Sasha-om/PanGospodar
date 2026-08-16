@@ -33,7 +33,13 @@ export default function ProductGallery({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative aspect-square w-full overflow-hidden rounded-sm border border-stone-200 bg-stone-50">
+      {/*
+        Square by aspect ratio but never taller than 450px, so the photo block
+        cannot push the buy buttons below the fold on a wide screen. The image
+        is `object-contain`: supplier photos come in every proportion, and
+        cropping a chainsaw to fill a square is worse than letterboxing it.
+      */}
+      <div className="relative aspect-square max-h-[450px] w-full overflow-hidden rounded-sm border border-stone-200 bg-white">
         <Image
           key={images[index]}
           src={images[index]}
@@ -42,7 +48,7 @@ export default function ProductGallery({
           }
           fill
           priority
-          className="object-cover"
+          className="object-contain p-3"
           sizes="(max-width: 1024px) 100vw, 50vw"
         />
 

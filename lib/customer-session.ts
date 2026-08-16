@@ -2,6 +2,7 @@ import { cache } from "react";
 import { cookies } from "next/headers";
 import {
   CUSTOMER_COOKIE,
+  CUSTOMER_SESSION_MS,
   signToken,
   verifyToken,
   type SessionPayload,
@@ -15,8 +16,10 @@ import {
  * signed-out visitor, so callers decide what an absent session means.
  */
 
-/** Shoppers return infrequently; a short admin-style expiry would just annoy. */
-const CUSTOMER_SESSION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/**
+ * The 30-day lifetime lives in `lib/auth-token.ts` because `proxy.ts` slides it
+ * forward on every visit — see `renewCustomerSession` there.
+ */
 
 function getSecret(): string {
   const secret = process.env.SESSION_SECRET;

@@ -56,15 +56,16 @@ export default function CheckoutForm() {
       action={formAction}
       className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]"
     >
-      {/* Cart snapshot — the server re-validates and recomputes the total. */}
+      {/*
+        Cart snapshot — only sku/quantity. The server looks up name and price
+        itself from the live catalog, so this field cannot set its own price.
+      */}
       <input
         type="hidden"
         name="items"
         value={JSON.stringify(
           items.map((item) => ({
             sku: item.id,
-            name: item.name,
-            price: item.price,
             quantity: item.quantity,
           })),
         )}

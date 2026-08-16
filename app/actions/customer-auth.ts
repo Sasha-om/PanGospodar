@@ -18,6 +18,7 @@ import {
   mergeFavorites,
 } from "@/lib/db";
 import { createCustomerSession, deleteCustomerSession } from "@/lib/customer-session";
+import { hashClientIp } from "@/lib/client-ip";
 import {
   hashPassword,
   isValidEmail,
@@ -25,6 +26,11 @@ import {
   validateRegistration,
   verifyPassword,
 } from "@/lib/customers";
+import {
+  checkLoginRateLimit,
+  hashAccount,
+  recordFailedLoginAttempt,
+} from "@/lib/login-rate-limit";
 import { normalizePhone } from "@/lib/orders";
 
 export interface AuthState {
@@ -126,6 +132,18 @@ export async function loginCustomer(
     return { error: DB_DOWN };
   }
 
+  // Checked before the password itself: a scripted brute force against one
+  // (or every) registered email gets a flat "try later" long before its
+  // guesses matter. Counted per address *and* per account, so spreading the
+  // guesses over a botnet does not buy the attacker anything. Scoped
+  // separately from the admin login's own budget.
+  const ipHash = await hashClientIp("panhospodar-customer-login");
+  const accountHash = hashAccount(email);
+  const limited = await checkLoginRateLimit("customer", ipHash, accountHash);
+  if (limited) {
+    return { error: limited };
+  }
+
   let customerId: number;
   try {
     await ensureCustomersSchema();
@@ -137,6 +155,7 @@ export async function loginCustomer(
       : await verifyPassword(password, "scrypt$16384$8$1$00$00");
 
     if (!customer || !ok) {
+      await recordFailedLoginAttempt("customer", ipHash, accountHash);
       return { error: "Невірний email або пароль." };
     }
     customerId = customer.id;

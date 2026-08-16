@@ -255,6 +255,113 @@ export async function sendEmailNotification(
   }
 }
 
+/* --------------------------- password reset mail -------------------------- */
+
+export function buildPasswordResetEmailHtml(
+  link: string,
+  ttlMinutes: number,
+): string {
+  // `link` carries a base64url token and the site's own origin — no user input
+  // reaches this template — but it is escaped anyway, so this stays safe if the
+  // origin ever becomes configurable by someone else.
+  const safeLink = escapeHtml(link).replace(/"/g, "&quot;");
+  return `<!doctype html>
+<html lang="uk"><body style="margin:0;background:#f5f5f4;font-family:Arial,Helvetica,sans-serif;color:#292524">
+  <div style="max-width:560px;margin:0 auto;padding:24px">
+    <div style="background:#fff;border:1px solid #e7e5e4;border-radius:4px;padding:24px">
+      <h1 style="margin:0 0 12px;font-size:20px">Відновлення пароля</h1>
+      <p style="margin:0 0 16px;font-size:14px;line-height:1.6">
+        Ви (або хтось інший) попросили відновити пароль до особистого кабінету
+        ПанГосподар. Натисніть кнопку нижче, щоб задати новий пароль.
+      </p>
+      <p style="margin:0 0 20px">
+        <a href="${safeLink}"
+           style="display:inline-block;background:#ff6b00;color:#fff;text-decoration:none;
+                  font-weight:700;font-size:15px;padding:12px 24px;border-radius:4px">
+          Задати новий пароль
+        </a>
+      </p>
+      <p style="margin:0 0 16px;font-size:13px;color:#78716c;line-height:1.6">
+        Посилання дійсне ${ttlMinutes} хвилин і спрацює лише один раз.
+        Якщо ви цього не просили — просто проігноруйте цей лист, ваш пароль
+        залишиться без змін.
+      </p>
+      <p style="margin:0;font-size:12px;color:#a8a29e;word-break:break-all">
+        Кнопка не працює? Скопіюйте посилання: ${safeLink}
+      </p>
+    </div>
+  </div>
+</body></html>`;
+}
+
+/**
+ * Can reset mail actually be delivered to an arbitrary customer?
+ *
+ * Checked *before* the account lookup so an unconfigured shop shows the same
+ * honest error to everyone — reporting it only when the address happens to
+ * exist would turn the form into an account-enumeration oracle.
+ */
+export function isPasswordResetEmailConfigured(): boolean {
+  return Boolean(
+    process.env.RESEND_API_KEY?.trim() && process.env.ORDER_EMAIL_FROM?.trim(),
+  );
+}
+
+/**
+ * Send a reset link to the customer.
+ *
+ * Unlike the order notifications, this one goes to a *customer's* address, not
+ * the shop's own — which means Resend needs a verified sending domain
+ * (`ORDER_EMAIL_FROM`). With the shared `onboarding@resend.dev` sender, Resend
+ * only delivers to the account owner, so every other customer would silently
+ * get nothing. Hence the explicit "not configured" result: the caller reports a
+ * plain failure to the customer rather than pretending mail was sent.
+ */
+export async function sendPasswordResetEmail(
+  to: string,
+  link: string,
+  ttlMinutes: number,
+): Promise<NotifyResult> {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = process.env.ORDER_EMAIL_FROM?.trim();
+
+  if (!apiKey || !from) {
+    console.warn(
+      "[notify] Password reset email not configured — need RESEND_API_KEY and ORDER_EMAIL_FROM on a verified domain",
+    );
+    return { channel: "email", ok: false, skipped: true };
+  }
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [to],
+        subject: "Відновлення пароля — ПанГосподар",
+        html: buildPasswordResetEmailHtml(link, ttlMinutes),
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status} ${detail.slice(0, 200)}`);
+    }
+    // The address itself is never logged — it is the one thing in this flow
+    // worth keeping out of the log stream.
+    console.info("[notify] Password reset email sent");
+    return { channel: "email", ok: true };
+  } catch (caught) {
+    const error = caught instanceof Error ? caught.message : String(caught);
+    console.error(`[notify] Password reset email failed: ${error}`);
+    return { channel: "email", ok: false, error };
+  }
+}
+
 /** Fire both channels; never throws. */
 export async function notifyNewOrder(order: Order): Promise<NotifyResult[]> {
   return Promise.all([

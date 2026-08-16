@@ -128,7 +128,14 @@ export default function AuthForm({
         />
         {isRegister ? (
           <p className="text-xs text-stone-500">Щонайменше 8 символів.</p>
-        ) : null}
+        ) : (
+          <Link
+            href="/account/forgot-password"
+            className="self-start text-xs font-semibold text-accent-600 transition-colors hover:text-accent-700"
+          >
+            Забули пароль?
+          </Link>
+        )}
         <FieldError message={errors.password} />
       </div>
 
