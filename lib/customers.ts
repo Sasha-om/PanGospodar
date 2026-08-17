@@ -40,6 +40,13 @@ export interface Customer {
   name: string;
   phone: string;
   createdAt: string;
+  /**
+   * Session generation — see `session_epoch` in `lib/db.ts`. Every session
+   * cookie is signed with the value that was current when it was issued, so
+   * raising it (password reset, password change) logs the account out
+   * everywhere at once.
+   */
+  sessionEpoch: number;
 }
 
 export interface CustomerWithSecret extends Customer {

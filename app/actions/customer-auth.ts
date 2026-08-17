@@ -102,6 +102,7 @@ export async function registerCustomer(
   }
 
   let customerId: number;
+  let sessionEpoch: number;
   try {
     await ensureCustomersSchema();
     const customer = await createCustomer({
@@ -111,6 +112,7 @@ export async function registerCustomer(
       phone,
     });
     customerId = customer.id;
+    sessionEpoch = customer.sessionEpoch;
     await mergeFavorites(customerId, guestFavorites);
   } catch (caught) {
     if (caught instanceof EmailTakenError) {
@@ -124,7 +126,7 @@ export async function registerCustomer(
     return { error: "Не вдалося створити акаунт. Спробуйте ще раз." };
   }
 
-  await createCustomerSession(customerId);
+  await createCustomerSession(customerId, sessionEpoch);
   // redirect() throws internally — keep it outside the try/catch.
   redirect(redirectTo);
 }
@@ -171,6 +173,7 @@ export async function loginCustomer(
   }
 
   let customerId: number;
+  let sessionEpoch = 1;
   try {
     await ensureCustomersSchema();
     const customer = await findCustomerByEmail(email);
@@ -188,6 +191,7 @@ export async function loginCustomer(
       };
     }
     customerId = customer.id;
+    sessionEpoch = customer.sessionEpoch;
     await mergeFavorites(customerId, guestFavorites);
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught);
@@ -195,7 +199,7 @@ export async function loginCustomer(
     return { error: "Не вдалося увійти. Спробуйте ще раз." };
   }
 
-  await createCustomerSession(customerId);
+  await createCustomerSession(customerId, sessionEpoch);
   redirect(redirectTo);
 }
 

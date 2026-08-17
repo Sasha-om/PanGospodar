@@ -45,6 +45,19 @@ export interface SessionPayload {
   role: SessionRole;
   /** Absolute expiry, milliseconds since epoch. */
   exp: number;
+  /**
+   * Session generation for customer tokens (`session_epoch` in the database).
+   *
+   * The signature makes a token unforgeable but says nothing about whether it
+   * should still be honoured; this is what lets the server retire one early. A
+   * password change raises the stored value and every cookie carrying the old
+   * one stops counting — otherwise a stolen session would outlive the very
+   * password change made to end it.
+   *
+   * Absent on admin tokens (one account, no database row) and on customer
+   * tokens issued before this field existed, which are read as generation 1.
+   */
+  ver?: number;
 }
 
 const encoder = new TextEncoder();

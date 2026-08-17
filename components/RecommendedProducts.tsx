@@ -11,18 +11,36 @@ const RECOMMENDED_COUNT = 8;
 /**
  * Compact homepage selection: in-stock, priced items, preferring recognizable
  * brands so the front page looks curated rather than alphabetical.
+ *
+ * `excludeBrand` exists for the brand shelf above it (`BrandShowcase`): showing
+ * the same STIHL saw twice on one screen makes the catalog look thinner than it
+ * is, so this block covers everything the shelf does not. The exclusion is
+ * dropped when it would empty the block — a shop that sells only STIHL should
+ * still have a second row rather than a hole.
  */
-export default function RecommendedProducts() {
+export default function RecommendedProducts({
+  excludeBrand,
+}: {
+  excludeBrand?: string;
+} = {}) {
   const { products, loading } = useProducts();
 
   const recommended = useMemo(() => {
     const sellable = products.filter(
       (product) => product.inStock !== false && product.price > 0,
     );
-    const branded = sellable.filter((product) => product.brand);
-    const rest = sellable.filter((product) => !product.brand);
+    const excluded = excludeBrand?.trim().toLowerCase();
+    const others = excluded
+      ? sellable.filter(
+          (product) => product.brand.trim().toLowerCase() !== excluded,
+        )
+      : sellable;
+    const pool = others.length > 0 ? others : sellable;
+
+    const branded = pool.filter((product) => product.brand);
+    const rest = pool.filter((product) => !product.brand);
     return [...branded, ...rest].slice(0, RECOMMENDED_COUNT);
-  }, [products]);
+  }, [products, excludeBrand]);
 
   return (
     <section className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6">

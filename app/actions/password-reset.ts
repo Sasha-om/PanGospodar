@@ -14,6 +14,7 @@
  */
 
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { hashClientIp } from "@/lib/client-ip";
 import { createCustomerSession } from "@/lib/customer-session";
 import {
@@ -41,12 +42,14 @@ import {
 import { TURNSTILE_FIELD } from "@/lib/turnstile";
 import {
   isPasswordResetEmailConfigured,
+  sendPasswordChangedEmail,
   sendPasswordResetEmail,
 } from "@/lib/notifications";
 import {
   RESET_TOKEN_TTL_MINUTES,
   buildResetLink,
   createResetToken,
+  hasTrustedOrigin,
   hashResetToken,
   resetTokenExpiry,
 } from "@/lib/password-reset";
@@ -67,6 +70,51 @@ export interface ResetPasswordState {
 const DB_DOWN =
   "Сервер тимчасово недоступний. Спробуйте пізніше або зателефонуйте нам.";
 
+const NOT_CONFIGURED =
+  "Відновлення пароля поштою поки не налаштоване. Зателефонуйте нам — " +
+  "ми відновимо доступ вручну.";
+
+/**
+ * Can a reset link actually be built and delivered?
+ *
+ * Two halves, both required: credentials for a *verified sending domain*
+ * (Resend refuses to mail a stranger from the shared sandbox sender) and an
+ * origin the link may point at (`lib/password-reset.ts`). Checked before any
+ * account lookup, so a misconfigured shop answers identically to everyone.
+ *
+ * In development the check is skipped and the link is printed to the terminal
+ * instead — see `deliverResetLink`. Without that, the whole flow is untestable
+ * locally unless you own a verified domain.
+ */
+function canDeliverResetLink(): boolean {
+  return (
+    (isPasswordResetEmailConfigured() && hasTrustedOrigin()) || isDevelopment()
+  );
+}
+
+function isDevelopment(): boolean {
+  return process.env.NODE_ENV !== "production";
+}
+
+/**
+ * Hand the link to the customer — by mail, or to the developer's terminal when
+ * mail is not configured and this is not production.
+ *
+ * Never throws and never reports back: the caller has already answered the
+ * browser, and the answer must not depend on whether the address exists.
+ */
+async function deliverResetLink(email: string, link: string): Promise<void> {
+  if (isPasswordResetEmailConfigured()) {
+    await sendPasswordResetEmail(email, link, RESET_TOKEN_TTL_MINUTES);
+    return;
+  }
+  if (isDevelopment()) {
+    console.info(
+      `[password-reset] DEV — mail is not configured, use this link:\n  ${link}`,
+    );
+  }
+}
+
 export async function requestPasswordReset(
   _prevState: ResetRequestState,
   formData: FormData,
@@ -81,12 +129,12 @@ export async function requestPasswordReset(
     return { error: DB_DOWN };
   }
   // Checked before the lookup so the answer cannot depend on the account.
-  if (!isPasswordResetEmailConfigured()) {
-    return {
-      error:
-        "Відновлення пароля поштою поки не налаштоване. Зателефонуйте нам — " +
-        "ми відновимо доступ вручну.",
-    };
+  if (!canDeliverResetLink()) {
+    console.error(
+      "[password-reset] Cannot send links: need RESEND_API_KEY, ORDER_EMAIL_FROM " +
+        "on a domain verified in Resend, and SITE_URL. Run: npm run check:email",
+    );
+    return { error: NOT_CONFIGURED };
   }
 
   // Throttled on both axes, like a login: per address so one script cannot
@@ -122,13 +170,17 @@ export async function requestPasswordReset(
     if (customer) {
       const { token, tokenHash } = createResetToken();
       await createPasswordReset(customer.id, tokenHash, resetTokenExpiry());
-      // A delivery failure is logged, never surfaced: the reply must not
-      // differ from the one an unknown address gets.
-      await sendPasswordResetEmail(
-        customer.email,
-        await buildResetLink(token),
-        RESET_TOKEN_TTL_MINUTES,
-      );
+      // The link is built here, while the request is still in scope, and only
+      // *sent* afterwards: a round trip to Resend takes a few hundred
+      // milliseconds, and a reply that is measurably slower for a registered
+      // address is an account-enumeration oracle no matter how carefully the
+      // wording matches. A delivery failure is logged, never surfaced, for the
+      // same reason.
+      const link = await buildResetLink(token);
+      const address = customer.email;
+      after(async () => {
+        await deliverResetLink(address, link);
+      });
     }
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught);
@@ -145,14 +197,30 @@ export async function requestPasswordReset(
 /**
  * Is this token still good? Used by the reset page to show "посилання
  * застаріло" before the customer types a new password twice for nothing.
+ *
+ * Exported from a `"use server"` module, which makes it a public endpoint — so
+ * it is throttled like everything else here. Only a *miss* is counted: a
+ * genuine customer arriving with a live link (possibly several times, or with a
+ * prefetch) never spends any of the budget, while anyone probing tokens burns
+ * it at one row per guess.
  */
 export async function isResetTokenValid(token: string): Promise<boolean> {
   if (!token || !hasDatabase()) {
     return false;
   }
+
+  const ipHash = await hashClientIp("panhospodar-password-reset");
+  if (await checkLoginRateLimit("reset", ipHash)) {
+    return false;
+  }
+
   try {
     await ensureCustomersSchema();
-    return (await findPasswordReset(hashResetToken(token))) !== null;
+    const found = (await findPasswordReset(hashResetToken(token))) !== null;
+    if (!found) {
+      await recordFailedLoginAttempt("reset", ipHash);
+    }
+    return found;
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught);
     console.error(`[password-reset] Token check failed: ${message}`);
@@ -187,10 +255,19 @@ export async function resetPassword(
     return { error: DB_DOWN };
   }
 
-  let customerId: number | null;
+  // A 256-bit token is not going to be guessed, but this is the one endpoint
+  // that would happily accept an unlimited stream of attempts, and the cost of
+  // not letting it is a single count query.
+  const ipHash = await hashClientIp("panhospodar-password-reset");
+  const limited = await checkLoginRateLimit("reset", ipHash);
+  if (limited) {
+    return { error: limited };
+  }
+
+  let consumed: Awaited<ReturnType<typeof consumePasswordReset>>;
   try {
     await ensureCustomersSchema();
-    customerId = await consumePasswordReset(
+    consumed = await consumePasswordReset(
       hashResetToken(token),
       await hashPassword(password),
     );
@@ -200,16 +277,27 @@ export async function resetPassword(
     return { error: "Не вдалося змінити пароль. Спробуйте ще раз." };
   }
 
-  if (customerId === null) {
+  if (consumed === null) {
+    await recordFailedLoginAttempt("reset", ipHash);
     return {
       error:
         "Посилання застаріло або вже було використане. Запросіть відновлення ще раз.",
     };
   }
 
+  // Tell the owner their password just changed. If it was not them — a stolen
+  // mailbox, say — this is the message that surfaces it while the order history
+  // can still be checked. Sent after the response for the same reason as above.
+  const address = consumed.email;
+  after(async () => {
+    await sendPasswordChangedEmail(address);
+  });
+
   // Signed in straight away: they have just proved control of the mailbox and
-  // chosen a password, so a login form here would be pure friction.
-  await createCustomerSession(customerId);
+  // chosen a password, so a login form here would be pure friction. The new
+  // session carries the raised generation, so this browser stays signed in
+  // while every session issued before the reset is now dead.
+  await createCustomerSession(consumed.id, consumed.sessionEpoch);
   // redirect() throws internally — keep it outside the try/catch.
   redirect("/account");
 }

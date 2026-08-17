@@ -95,8 +95,12 @@ async function renewCustomerSession(
     }
 
     const expiresAt = Date.now() + CUSTOMER_SESSION_MS;
+    // `ver` is copied, never re-read: the proxy runs on every request and must
+    // stay database-free. A renewal therefore extends a session without ever
+    // promoting a retired one — `getCustomerId` still compares the generation
+    // against the account before the cookie is worth anything.
     const renewed = await signToken(
-      { sub: payload.sub, role: "customer", exp: expiresAt },
+      { sub: payload.sub, role: "customer", exp: expiresAt, ver: payload.ver },
       secret,
     );
     response.cookies.set(CUSTOMER_COOKIE, renewed, {

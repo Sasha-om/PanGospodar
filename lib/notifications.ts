@@ -211,18 +211,26 @@ export function buildOrderEmailHtml(order: Order): string {
 }
 
 /**
- * Sends via Resend's REST API (no SDK dependency needed).
- * Requires RESEND_API_KEY; ORDER_EMAIL_FROM must be on a verified domain.
+ * One POST to Resend's REST API (no SDK dependency needed), shared by every
+ * message the site sends.
+ *
+ * Resend's error body is the only place that says *why* a message was refused —
+ * an unverified domain, a sandbox sender that may only write to the account
+ * owner, a revoked key — so it is carried back in `error` and logged verbatim
+ * rather than collapsed into "email failed".
  */
-export async function sendEmailNotification(
-  order: Order,
-): Promise<NotifyResult> {
+async function sendViaResend(input: {
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  replyTo?: string;
+  /** Prefix for log lines, e.g. `order #12`. Never contains an address. */
+  context: string;
+}): Promise<NotifyResult> {
   const apiKey = process.env.RESEND_API_KEY?.trim();
-  const to = process.env.ADMIN_EMAIL?.trim();
-  const from = process.env.ORDER_EMAIL_FROM?.trim() || "onboarding@resend.dev";
-
-  if (!apiKey || !to) {
-    console.warn("[notify] Email not configured — skipping");
+  if (!apiKey) {
+    console.warn(`[notify] ${input.context}: RESEND_API_KEY not set — skipping`);
     return { channel: "email", ok: false, skipped: true };
   }
 
@@ -234,25 +242,55 @@ export async function sendEmailNotification(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from,
-        to: [to],
-        subject: `${emailHeading(order)} — ${order.firstName} ${order.lastName}`.trim(),
-        html: buildOrderEmailHtml(order),
-        reply_to: order.email.trim() || undefined,
+        from: input.from,
+        to: [input.to],
+        subject: input.subject,
+        html: input.html,
+        reply_to: input.replyTo || undefined,
       }),
+      // Mail must not hold a Server Action open indefinitely.
+      signal: AbortSignal.timeout(10000),
     });
 
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
-      throw new Error(`HTTP ${response.status} ${detail.slice(0, 200)}`);
+      throw new Error(`HTTP ${response.status} ${detail.slice(0, 300)}`);
     }
-    console.info(`[notify] Email sent for order #${order.id}`);
+    console.info(`[notify] ${input.context}: email sent`);
     return { channel: "email", ok: true };
   } catch (caught) {
     const error = caught instanceof Error ? caught.message : String(caught);
-    console.error(`[notify] Email failed for #${order.id}: ${error}`);
+    console.error(`[notify] ${input.context}: email failed — ${error}`);
     return { channel: "email", ok: false, error };
   }
+}
+
+/**
+ * Sends via Resend's REST API (no SDK dependency needed).
+ * Requires RESEND_API_KEY; ORDER_EMAIL_FROM must be on a verified domain.
+ */
+export async function sendEmailNotification(
+  order: Order,
+): Promise<NotifyResult> {
+  const to = process.env.ADMIN_EMAIL?.trim();
+  // The shop's own invoice may use the shared sandbox sender: it goes to the
+  // Resend account owner, which is exactly who ADMIN_EMAIL is. Customer-facing
+  // mail below cannot (see `sendPasswordResetEmail`).
+  const from = process.env.ORDER_EMAIL_FROM?.trim() || "onboarding@resend.dev";
+
+  if (!to) {
+    console.warn("[notify] ADMIN_EMAIL not set — skipping order email");
+    return { channel: "email", ok: false, skipped: true };
+  }
+
+  return sendViaResend({
+    from,
+    to,
+    subject: `${emailHeading(order)} — ${order.firstName} ${order.lastName}`.trim(),
+    html: buildOrderEmailHtml(order),
+    replyTo: order.email.trim(),
+    context: `order #${order.id}`,
+  });
 }
 
 /* --------------------------- password reset mail -------------------------- */
@@ -322,44 +360,68 @@ export async function sendPasswordResetEmail(
   link: string,
   ttlMinutes: number,
 ): Promise<NotifyResult> {
-  const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.ORDER_EMAIL_FROM?.trim();
-
-  if (!apiKey || !from) {
+  if (!from) {
     console.warn(
-      "[notify] Password reset email not configured — need RESEND_API_KEY and ORDER_EMAIL_FROM on a verified domain",
+      "[notify] password reset: ORDER_EMAIL_FROM not set — a verified sending domain is required to mail a customer",
     );
     return { channel: "email", ok: false, skipped: true };
   }
 
-  try {
-    const response = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from,
-        to: [to],
-        subject: "Відновлення пароля — ПанГосподар",
-        html: buildPasswordResetEmailHtml(link, ttlMinutes),
-      }),
-    });
+  // The address itself is never logged — it is the one thing in this flow worth
+  // keeping out of the log stream.
+  return sendViaResend({
+    from,
+    to,
+    subject: "Відновлення пароля — ПанГосподар",
+    html: buildPasswordResetEmailHtml(link, ttlMinutes),
+    context: "password reset",
+  });
+}
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`HTTP ${response.status} ${detail.slice(0, 200)}`);
-    }
-    // The address itself is never logged — it is the one thing in this flow
-    // worth keeping out of the log stream.
-    console.info("[notify] Password reset email sent");
-    return { channel: "email", ok: true };
-  } catch (caught) {
-    const error = caught instanceof Error ? caught.message : String(caught);
-    console.error(`[notify] Password reset email failed: ${error}`);
-    return { channel: "email", ok: false, error };
+/**
+ * "Your password has just been changed."
+ *
+ * The one message in this flow the customer did not ask for, and the reason it
+ * exists: a password change is the last step of an account takeover, and this
+ * is what turns it into something the owner finds out about the same minute
+ * rather than the next time they fail to sign in. Sent for both routes — the
+ * reset link and the in-account change.
+ */
+export function buildPasswordChangedEmailHtml(): string {
+  return `<!doctype html>
+<html lang="uk"><body style="margin:0;background:#f5f5f4;font-family:Arial,Helvetica,sans-serif;color:#292524">
+  <div style="max-width:560px;margin:0 auto;padding:24px">
+    <div style="background:#fff;border:1px solid #e7e5e4;border-radius:4px;padding:24px">
+      <h1 style="margin:0 0 12px;font-size:20px">Пароль змінено</h1>
+      <p style="margin:0 0 16px;font-size:14px;line-height:1.6">
+        Пароль до вашого особистого кабінету ПанГосподар щойно змінили.
+        Усі попередні входи на інших пристроях завершено.
+      </p>
+      <p style="margin:0;padding:12px;background:#fff7ed;border:1px solid #fed7aa;
+                border-radius:4px;font-size:14px;line-height:1.6;color:#9a3412">
+        <strong>Це були не ви?</strong> Одразу зателефонуйте нам — ми заблокуємо
+        доступ до акаунта та перевіримо замовлення.
+      </p>
+    </div>
+  </div>
+</body></html>`;
+}
+
+export async function sendPasswordChangedEmail(
+  to: string,
+): Promise<NotifyResult> {
+  const from = process.env.ORDER_EMAIL_FROM?.trim();
+  if (!from || !to) {
+    return { channel: "email", ok: false, skipped: true };
   }
+  return sendViaResend({
+    from,
+    to,
+    subject: "Пароль до кабінету змінено — ПанГосподар",
+    html: buildPasswordChangedEmailHtml(),
+    context: "password changed",
+  });
 }
 
 /** Fire both channels; never throws. */

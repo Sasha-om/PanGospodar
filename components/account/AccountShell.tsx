@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Heart, LogOut, Package } from "lucide-react";
+import { Heart, KeyRound, LogOut, Package } from "lucide-react";
 import { logoutCustomer } from "@/app/actions/customer-auth";
 import PageHeader from "@/components/PageHeader";
 
@@ -16,13 +16,14 @@ export default function AccountShell({
   favoriteCount,
   children,
 }: {
-  active: "orders" | "favorites";
+  active: "orders" | "favorites" | "password";
   name: string;
   email: string;
   orderCount: number;
   favoriteCount: number;
   children: React.ReactNode;
 }) {
+  // `count` is optional: a counter next to "Безпека" would mean nothing.
   const tabs = [
     {
       id: "orders" as const,
@@ -37,6 +38,13 @@ export default function AccountShell({
       label: "Улюблені",
       icon: Heart,
       count: favoriteCount,
+    },
+    {
+      id: "password" as const,
+      href: "/account/password",
+      label: "Пароль",
+      icon: KeyRound,
+      count: undefined,
     },
   ];
 
@@ -66,13 +74,15 @@ export default function AccountShell({
                 >
                   <Icon className="h-4 w-4" aria-hidden="true" />
                   {tab.label}
-                  <span
-                    className={`rounded-full px-1.5 text-xs font-semibold ${
-                      isActive ? "bg-white/20" : "bg-stone-100 text-stone-500"
-                    }`}
-                  >
-                    {tab.count}
-                  </span>
+                  {tab.count === undefined ? null : (
+                    <span
+                      className={`rounded-full px-1.5 text-xs font-semibold ${
+                        isActive ? "bg-white/20" : "bg-stone-100 text-stone-500"
+                      }`}
+                    >
+                      {tab.count}
+                    </span>
+                  )}
                 </Link>
               );
             })}

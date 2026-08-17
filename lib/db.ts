@@ -1489,6 +1489,14 @@ export async function ensureCustomersTable(): Promise<void> {
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS customers_email_key ON customers (lower(email))
   `;
+  // Session generation. The customer's cookie carries the number it was signed
+  // with; bumping it here invalidates every session that customer has anywhere,
+  // which is the whole point of changing a password after a break-in. Starts at
+  // 1 rather than 0 so an absent/legacy value in a token is distinguishable.
+  await sql`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS session_epoch integer NOT NULL DEFAULT 1
+  `;
   await sql`
     CREATE TABLE IF NOT EXISTS favorites (
       customer_id integer NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
@@ -1546,6 +1554,8 @@ interface CustomerRow {
   name: string | null;
   phone: string | null;
   created_at: string | Date;
+  /** Absent on a database that has not run the `ALTER TABLE` above yet. */
+  session_epoch?: number | null;
 }
 
 function rowToCustomer(row: CustomerRow): CustomerWithSecret {
@@ -1559,6 +1569,10 @@ function rowToCustomer(row: CustomerRow): CustomerWithSecret {
       row.created_at instanceof Date
         ? row.created_at.toISOString()
         : String(row.created_at),
+    // A row from before the column existed reads as generation 1, the same
+    // value a fresh row gets — so no existing session is invalidated by the
+    // migration itself.
+    sessionEpoch: Number(row.session_epoch ?? 1) || 1,
   };
 }
 
@@ -1637,7 +1651,31 @@ export async function findCustomerById(id: number): Promise<Customer | null> {
       name: full.name,
       phone: full.phone,
       createdAt: full.createdAt,
+      sessionEpoch: full.sessionEpoch,
     };
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureCustomersTable();
+    return null;
+  }
+}
+
+/**
+ * Like `findCustomerById`, but keeps the password hash.
+ *
+ * Separate from the plain lookup on purpose: the hash is needed in exactly one
+ * place — re-checking the current password before changing it — and everything
+ * else has no business holding it.
+ */
+export async function findCustomerSecretById(
+  id: number,
+): Promise<CustomerWithSecret | null> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT * FROM customers WHERE id = ${id} LIMIT 1
+    `) as CustomerRow[];
+    return rows.length > 0 ? rowToCustomer(rows[0]) : null;
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
     await ensureCustomersTable();
@@ -1662,6 +1700,65 @@ export async function updateCustomerContact(
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
   }
+}
+
+/**
+ * The generation a customer's sessions must carry to still count, or `null`
+ * when the account is gone.
+ *
+ * One tiny primary-key lookup, called once per request via the React `cache` in
+ * `lib/customer-session.ts`. It is what turns a stateless cookie into something
+ * that can be revoked: without it, a password change cannot reach a token
+ * already sitting in an attacker's browser.
+ */
+export async function getCustomerSessionEpoch(
+  id: number,
+): Promise<number | null> {
+  const sql = getSql();
+  try {
+    const rows = (await sql`
+      SELECT session_epoch FROM customers WHERE id = ${id} LIMIT 1
+    `) as { session_epoch: number | null }[];
+    if (rows.length === 0) {
+      return null;
+    }
+    return Number(rows[0].session_epoch ?? 1) || 1;
+  } catch (caught) {
+    if (!isMissingSchemaError(caught)) throw caught;
+    // Table (or column) not migrated yet — no session has been invalidated.
+    await ensureCustomersTable();
+    return 1;
+  }
+}
+
+/**
+ * Set a new password for a signed-in customer and retire every session that
+ * was issued under the old one.
+ *
+ * Returns the new session generation, which the caller signs into a fresh
+ * cookie for the browser doing the change — so the person changing their
+ * password stays signed in, and every other device does not.
+ */
+export async function changeCustomerPassword(
+  id: number,
+  passwordHash: string,
+): Promise<number | null> {
+  const sql = getSql();
+  const rows = (await sql`
+    UPDATE customers
+    SET password_hash = ${passwordHash},
+        session_epoch = session_epoch + 1
+    WHERE id = ${id}
+    RETURNING session_epoch
+  `) as { session_epoch: number }[];
+
+  if (rows.length === 0) {
+    return null;
+  }
+  // Any reset link that was in flight is void now: the password it was going
+  // to change has already changed.
+  await sql`DELETE FROM password_resets WHERE customer_id = ${id}`;
+  return Number(rows[0].session_epoch) || 1;
 }
 
 /* --------------------------- password resets ------------------------------ */
@@ -1726,15 +1823,26 @@ export async function findPasswordReset(
  * Returns the customer whose password was changed, or `null` if the ticket was
  * not usable.
  */
+export interface ConsumedReset {
+  id: number;
+  email: string;
+  /** Generation the new session must be signed with (every older one dies). */
+  sessionEpoch: number;
+}
+
 export async function consumePasswordReset(
   tokenHash: string,
   passwordHash: string,
-): Promise<number | null> {
+): Promise<ConsumedReset | null> {
   const sql = getSql();
   // One statement, not two: the data-modifying CTE claims the ticket and the
   // outer UPDATE only ever runs for a ticket that was actually claimed. Two
   // separate statements could not express this — the second would have to
   // re-find a row the first had just marked used.
+  //
+  // `session_epoch + 1` is part of the same statement for the same reason the
+  // ticket is burned here: a reset is how someone recovers a *stolen* account,
+  // and it would be worth little if the thief's existing cookie kept working.
   const rows = (await sql`
     WITH claimed AS (
       UPDATE password_resets
@@ -1745,13 +1853,21 @@ export async function consumePasswordReset(
       RETURNING customer_id
     )
     UPDATE customers
-    SET password_hash = ${passwordHash}
+    SET password_hash = ${passwordHash},
+        session_epoch = session_epoch + 1
     FROM claimed
     WHERE customers.id = claimed.customer_id
-    RETURNING customers.id
-  `) as { id: number }[];
+    RETURNING customers.id, customers.email, customers.session_epoch
+  `) as { id: number; email: string; session_epoch: number }[];
 
-  return rows[0]?.id ?? null;
+  const row = rows[0];
+  return row
+    ? {
+        id: row.id,
+        email: row.email ?? "",
+        sessionEpoch: Number(row.session_epoch) || 1,
+      }
+    : null;
 }
 
 /* ------------------------------ favorites -------------------------------- */

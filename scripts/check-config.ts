@@ -105,8 +105,21 @@ const fromLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromAddress);
 report(
   isSet("RESEND_API_KEY") ? "ok" : "warn",
   "RESEND_API_KEY",
-  isSet("RESEND_API_KEY") ? "задано" : "не задано — листи не надсилатимуться",
+  isSet("RESEND_API_KEY")
+    ? "задано — чи працює насправді: npm run check:email"
+    : "не задано — листи не надсилатимуться",
 );
+// The classic silent failure: the sandbox sender is accepted by Resend and by
+// every check here, but delivers only to the account owner — so order mail
+// arrives, password resets to customers never do.
+if (/resend\.dev/i.test(value("ORDER_EMAIL_FROM"))) {
+  report(
+    "fail",
+    "відправник resend.dev",
+    "onboarding@resend.dev доставляє ЛИШЕ власнику акаунта Resend — " +
+      "клієнти не отримають відновлення пароля. Потрібен свій домен.",
+  );
+}
 report(
   from ? (fromLooksValid ? "ok" : "fail") : "warn",
   "ORDER_EMAIL_FROM",
