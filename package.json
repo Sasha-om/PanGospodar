@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "check:config": "tsx scripts/check-config.ts",
+    "check:totp": "tsx scripts/check-totp.ts",
     "generate:descriptions": "tsx scripts/generate-descriptions.ts",
     "generate:descriptions:test": "tsx scripts/generate-descriptions.ts --limit 30 --dry-run"
   },

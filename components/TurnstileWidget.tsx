@@ -31,7 +31,12 @@ declare global {
   }
 }
 
-export default function TurnstileWidget() {
+export default function TurnstileWidget({
+  hint = "Через кілька невдалих спроб ми просимо підтвердити, що ви не робот.",
+}: {
+  /** Why the visitor is being asked — the reason differs per form. */
+  hint?: string;
+}) {
   const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "";
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetIdRef = useRef<string | null>(null);
@@ -92,9 +97,7 @@ export default function TurnstileWidget() {
         onReady={() => setReady(true)}
       />
       <div ref={containerRef} />
-      <p className="text-xs text-stone-500">
-        Через кілька невдалих спроб ми просимо підтвердити, що ви не робот.
-      </p>
+      <p className="text-xs text-stone-500">{hint}</p>
     </div>
   );
 }

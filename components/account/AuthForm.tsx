@@ -36,8 +36,9 @@ export default function AuthForm({
   mode: "login" | "register";
   from?: string;
   /**
-   * Whether this address has already failed often enough to owe a challenge.
-   * Resolved on the server, so a reload after several misses shows the widget
+   * Whether the challenge is due. On sign-in that means this address has
+   * already failed often enough; on registration it simply means Turnstile is
+   * configured. Resolved on the server either way, so a reload shows the widget
    * immediately rather than costing one more rejected attempt.
    */
   captchaRequired?: boolean;
@@ -49,11 +50,10 @@ export default function AuthForm({
   );
   const [favorites, setFavorites] = useState("[]");
   const errors = state.fieldErrors ?? {};
-  // Registration never asks for one: there is nothing to guess, and the
-  // throttles that matter there are the database's own unique-email index and
-  // the order limits further down the funnel.
-  const showCaptcha =
-    !isRegister && (captchaRequired || state.requireCaptcha === true);
+  // On registration `captchaRequired` simply means "Turnstile is configured",
+  // so the challenge is there from the first attempt; on sign-in it means this
+  // address has already missed a few times.
+  const showCaptcha = captchaRequired || state.requireCaptcha === true;
 
   // Read after mount: the server rendered an empty list, so touching
   // localStorage during render would produce a hydration mismatch. Adopting
@@ -152,7 +152,15 @@ export default function AuthForm({
         <FieldError message={errors.password} />
       </div>
 
-      {showCaptcha ? <TurnstileWidget /> : null}
+      {showCaptcha ? (
+        <TurnstileWidget
+          hint={
+            isRegister
+              ? "Підтвердіть, що ви не робот — це захищає магазин від фейкових реєстрацій."
+              : undefined
+          }
+        />
+      ) : null}
 
       {state.error ? (
         <p

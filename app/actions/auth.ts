@@ -9,7 +9,11 @@ import {
   recordFailedLoginAttempt,
 } from "@/lib/login-rate-limit";
 import { createSession, deleteSession } from "@/lib/session";
-import { isAdminTotpEnabled, verifyAdminTotp } from "@/lib/totp";
+import {
+  adminTotpSecretIssue,
+  isAdminTotpEnabled,
+  verifyAdminTotp,
+} from "@/lib/totp";
 import { TURNSTILE_FIELD } from "@/lib/turnstile";
 
 export interface LoginState {
@@ -69,6 +73,14 @@ export async function login(
         "Settings → Environment Variables і зробіть Redeploy " +
         "(для локальної роботи — у .env.local).",
     };
+  }
+
+  // A malformed 2FA secret rejects every code, including correct ones — say so
+  // instead of letting it look like a wrong code forever.
+  const totpIssue = adminTotpSecretIssue();
+  if (totpIssue) {
+    console.error(`[auth] ${totpIssue}`);
+    return { error: `Двофакторну автентифікацію налаштовано неправильно. ${totpIssue}` };
   }
 
   // Checked before the password itself: a scripted brute force gets a flat

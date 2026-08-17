@@ -33,7 +33,7 @@ import {
   needsCaptcha,
   recordFailedLoginAttempt,
 } from "@/lib/login-rate-limit";
-import { TURNSTILE_FIELD } from "@/lib/turnstile";
+import { TURNSTILE_FIELD, guardRequiredCaptcha } from "@/lib/turnstile";
 import { normalizePhone } from "@/lib/orders";
 
 export interface AuthState {
@@ -90,6 +90,15 @@ export async function registerCustomer(
   if (!hasDatabase()) {
     console.error("[account] No database configured — cannot register");
     return { error: DB_DOWN };
+  }
+
+  // Unlike the logins, this one is not earned by failing: a signup script has
+  // no wrong answer to count against it, and every attempt already costs a row.
+  const challenge = await guardRequiredCaptcha(
+    String(formData.get(TURNSTILE_FIELD) ?? ""),
+  );
+  if (challenge) {
+    return { error: challenge, requireCaptcha: true };
   }
 
   let customerId: number;

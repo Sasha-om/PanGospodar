@@ -15,6 +15,8 @@
  * worrying about for a shop this size, and does not profile the visitor.
  */
 
+import { readClientIp } from "@/lib/client-ip";
+
 /** Public key. Safe in the browser bundle — it identifies the widget, nothing more. */
 export function turnstileSiteKey(): string {
   return process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim() ?? "";
@@ -37,6 +39,27 @@ export const TURNSTILE_FIELD = "cf-turnstile-response";
 
 export const CAPTCHA_FAILED =
   "Підтвердіть, що ви не робот, і спробуйте ще раз.";
+
+/**
+ * The gate for a form where the challenge is **always** due rather than earned
+ * by failing — registration is the one such form.
+ *
+ * A login can be gated on past failures because a wrong password is a signal in
+ * itself. A signup has no wrong answer to count: a script pointed at it just
+ * creates accounts, and the first one already costs a row and a mailbox that
+ * looks real. So the challenge stands from the first attempt.
+ *
+ * Returns `null` to proceed, or the message to show. Always `null` while
+ * Turnstile is unconfigured.
+ */
+export async function guardRequiredCaptcha(answer: string): Promise<string | null> {
+  if (!isTurnstileEnabled()) {
+    return null;
+  }
+  return (await verifyTurnstile(answer, await readClientIp()))
+    ? null
+    : CAPTCHA_FAILED;
+}
 
 interface SiteVerifyResponse {
   success?: boolean;

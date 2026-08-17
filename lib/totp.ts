@@ -29,6 +29,34 @@ export function isAdminTotpEnabled(): boolean {
   return normalizeSecret(process.env.ADMIN_TOTP_SECRET ?? "").length > 0;
 }
 
+/**
+ * A configured secret that cannot possibly work, described in a sentence — or
+ * `null` when there is nothing wrong.
+ *
+ * This exists because the failure is otherwise indistinguishable from a wrong
+ * code: a secret with a typo (base32 has no `0`, `1`, `8` or `9`) decodes to
+ * nothing, every code is rejected, and the only symptom is an admin locked out
+ * of their own panel, retyping a code that was correct all along. The login
+ * surfaces this the same way it already surfaces a missing `ADMIN_PASSWORD`.
+ *
+ * Reporting it is safe: it says the secret is malformed, never what it is, and
+ * only an operator who can read the deploy's environment can act on it.
+ */
+export function adminTotpSecretIssue(): string | null {
+  const raw = process.env.ADMIN_TOTP_SECRET ?? "";
+  if (normalizeSecret(raw).length === 0) {
+    return null; // Not configured — 2FA is simply off.
+  }
+  if (base32Decode(raw).length === 0) {
+    return (
+      "ADMIN_TOTP_SECRET не є коректним base32 — у ньому є символи поза " +
+      "алфавітом A–Z та 2–7 (найчастіше 0, 1, 8 або 9). Згенеруйте секрет " +
+      "командою: openssl rand -base64 20 | base32 | tr -d '='"
+    );
+  }
+  return null;
+}
+
 /** Authenticator apps print the secret in groups and lower case; accept both. */
 function normalizeSecret(raw: string): string {
   return raw.replace(/[\s-]/g, "").toUpperCase();
