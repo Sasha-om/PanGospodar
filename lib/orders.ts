@@ -124,6 +124,32 @@ export function describeShortages(shortages: StockShortage[]): string {
   return `Недостатньо товару на складі: ${lines.join("; ")}.`;
 }
 
+/**
+ * Length ceilings for the free-text fields of an order.
+ *
+ * Nothing validated these before: the forms cap nothing, and a Server Action
+ * accepts a body up to 1 MB, so a hand-built request could store a megabyte of
+ * text per field — and then push it through the Telegram message and the
+ * seller's email, where it does not fit either. These are generous for a real
+ * Ukrainian name, settlement or branch, and bounded.
+ */
+export const ORDER_FIELD_MAX = {
+  name: 80,
+  phone: 32,
+  email: 200,
+  city: 120,
+  warehouse: 200,
+  comment: 1000,
+} as const;
+
+/** Trim and cap one field. The only place order text is length-limited. */
+export function capOrderField(
+  value: string,
+  field: keyof typeof ORDER_FIELD_MAX,
+): string {
+  return value.trim().slice(0, ORDER_FIELD_MAX[field]);
+}
+
 export interface OrderInput {
   type: OrderType;
   firstName: string;

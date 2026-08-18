@@ -18,6 +18,7 @@ import {
   CONTACT_CHANNELS,
   PAYMENT_METHODS,
   UNSPECIFIED,
+  capOrderField,
   normalizePhone,
   type ContactChannel,
   type PaymentMethod,
@@ -43,14 +44,15 @@ export async function submitBuyNow(
   const text = (key: string) => String(formData.get(key) ?? "").trim();
 
   const productId = text("productId");
-  const firstName = text("firstName");
-  const lastName = text("lastName");
-  const email = text("email");
+  // Capped on the way in, like the cart checkout — same fields, same ceilings.
+  const firstName = capOrderField(text("firstName"), "name");
+  const lastName = capOrderField(text("lastName"), "name");
+  const email = capOrderField(text("email"), "email");
   const contactChannel = text("contactChannel");
-  const city = text("city");
-  const warehouse = text("warehouse");
+  const city = capOrderField(text("city"), "city");
+  const warehouse = capOrderField(text("warehouse"), "warehouse");
   const paymentMethod = text("paymentMethod");
-  const comment = text("comment");
+  const comment = capOrderField(text("comment"), "comment");
 
   const fieldErrors: Record<string, string> = {};
 
@@ -124,8 +126,8 @@ export async function submitReservation(
   const text = (key: string) => String(formData.get(key) ?? "").trim();
 
   const productId = text("productId");
-  const firstName = text("firstName");
-  const email = text("email");
+  const firstName = capOrderField(text("firstName"), "name");
+  const email = capOrderField(text("email"), "email");
 
   const fieldErrors: Record<string, string> = {};
 

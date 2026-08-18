@@ -43,9 +43,23 @@ export async function deleteSession(): Promise<void> {
   cookieStore.delete(SESSION_COOKIE);
 }
 
-/** Read and verify the current session, or `null` if not signed in. */
+/**
+ * Read and verify the current **admin** session, or `null`.
+ *
+ * The role is part of the check, not an extra someone may remember to add: the
+ * customer cookie is signed with the same `SESSION_SECRET`, so a valid
+ * signature alone says only "this site issued this token", never "this token
+ * belongs to the admin". A signed-in customer can read their own cookie in
+ * their own browser and present its value under this cookie's name — every
+ * caller that trusted a non-null result was one such request away from handing
+ * over the admin panel's API.
+ *
+ * Kept here rather than at the call sites so a new admin endpoint is safe by
+ * default; `verifySession` in `lib/dal.ts` checks the role again on top.
+ */
 export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE)?.value;
-  return verifyToken(token, getSecret());
+  const payload = await verifyToken(token, getSecret());
+  return payload?.role === "admin" ? payload : null;
 }

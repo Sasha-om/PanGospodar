@@ -2000,11 +2000,31 @@ export async function listOrdersForCustomer(
   const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
   try {
+    /*
+     * Orders this account owns outright, plus the guest orders it can prove
+     * are its own.
+     *
+     * That second half used to match on email OR phone, either alone — which
+     * made an order's contact details its password. Nothing verifies an
+     * address at signup, so registering as someone@else.com was enough to read
+     * their name, phone, delivery branch and everything they had bought; the
+     * phone half was worse, because a checkout writes the phone straight onto
+     * the profile (`updateCustomerContact`).
+     *
+     * Both must match now, and only for orders nobody owns yet: an order
+     * already claimed by another account is never shown here regardless. This
+     * is a narrowing, not a cure — an attacker who knows both the email and
+     * the phone still matches. Verifying the address at signup is what would
+     * actually settle it; see README, "Чого ще немає".
+     */
     const rows = (await sql`
       SELECT * FROM orders
       WHERE customer_id = ${customerId}
-         OR (${email} <> '' AND lower(email) = lower(${email}))
-         OR (${phone} <> '' AND phone = ${phone})
+         OR (
+              customer_id IS NULL
+              AND ${email} <> '' AND lower(email) = lower(${email})
+              AND ${phone} <> '' AND phone = ${phone}
+            )
       ORDER BY created_at DESC
       LIMIT ${safeLimit}
     `) as OrderRow[];

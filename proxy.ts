@@ -31,7 +31,12 @@ export default async function proxy(req: NextRequest) {
   const isLoginRoute = pathname === "/login";
 
   if (isAdminRoute || isLoginRoute) {
-    const session = await verifyToken(req.cookies.get(SESSION_COOKIE)?.value, secret);
+    const token = await verifyToken(req.cookies.get(SESSION_COOKIE)?.value, secret);
+    // Both cookies are signed with the same secret, so the role is what
+    // separates an admin token from a customer's — checking only the signature
+    // would let a customer token through this gate. The admin layout checks it
+    // again; this keeps the two answers consistent.
+    const session = token?.role === "admin" ? token : null;
 
     // Unauthenticated users may not see the admin panel.
     if (isAdminRoute && !session) {

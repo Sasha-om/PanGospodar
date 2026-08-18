@@ -8,6 +8,7 @@ import {
 import {
   CONTACT_CHANNELS,
   PAYMENT_METHODS,
+  capOrderField,
   normalizePhone,
   type ContactChannel,
   type PaymentMethod,
@@ -29,15 +30,17 @@ export async function submitOrder(
 ): Promise<CheckoutState> {
   const text = (key: string) => String(formData.get(key) ?? "").trim();
 
-  const firstName = text("firstName");
-  const lastName = text("lastName");
-  const rawPhone = text("phone");
-  const email = text("email");
+  // Capped as they are read: everything below this line, including what is
+  // stored and what is mailed to the seller, is then bounded by construction.
+  const firstName = capOrderField(text("firstName"), "name");
+  const lastName = capOrderField(text("lastName"), "name");
+  const rawPhone = capOrderField(text("phone"), "phone");
+  const email = capOrderField(text("email"), "email");
   const contactChannel = text("contactChannel");
-  const city = text("city");
-  const warehouse = text("warehouse");
+  const city = capOrderField(text("city"), "city");
+  const warehouse = capOrderField(text("warehouse"), "warehouse");
   const paymentMethod = text("paymentMethod");
-  const comment = text("comment");
+  const comment = capOrderField(text("comment"), "comment");
   // Only sku/quantity come from the browser; name and price are resolved from
   // the live catalog below, so an edited hidden field cannot set its own price.
   const items = await buildLinesFromCatalog(String(formData.get("items") ?? "[]"));

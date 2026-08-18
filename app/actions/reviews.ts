@@ -8,10 +8,9 @@
  * is written, and a submission is only ever stored as `PENDING`.
  */
 
-import { createHash } from "node:crypto";
-import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { loadProducts } from "@/lib/catalog";
+import { hashClientIp } from "@/lib/client-ip";
 import {
   countRecentReviewsByIp,
   createReview,
@@ -41,27 +40,14 @@ export interface ReviewFormState {
  * Hash the caller's IP so the rate limiter can recognise a repeat visitor
  * without the database ever holding an address.
  *
- * Salted with `SESSION_SECRET`, which is already required in production, so
- * the stored digests are useless if the table ever leaks.
+ * Delegated to `lib/client-ip.ts` rather than reading the headers here: this
+ * copy preferred `x-forwarded-for`, which any client may set, over
+ * `x-vercel-forwarded-for`, which the platform sets and outsiders cannot
+ * forge. A spoofable key is a rate limit a script sidesteps by changing one
+ * header per request. One implementation means one place to get that right.
  */
-async function clientIpHash(): Promise<string> {
-  const headerList = await headers();
-  // `x-forwarded-for` is a client-controlled list; the left-most entry is the
-  // original client, and on Vercel the platform rewrites it, so it is
-  // trustworthy there. Fall back to the platform's own header.
-  const forwarded = headerList.get("x-forwarded-for") ?? "";
-  const ip =
-    forwarded.split(",")[0]?.trim() ||
-    headerList.get("x-real-ip")?.trim() ||
-    "";
-
-  if (!ip) {
-    // No address to key on — return empty, and the limiter skips this caller
-    // rather than lumping every anonymous request into one bucket.
-    return "";
-  }
-  const salt = process.env.SESSION_SECRET ?? "pangospodar-reviews";
-  return createHash("sha256").update(`${salt}:${ip}`).digest("hex");
+function clientIpHash(): Promise<string> {
+  return hashClientIp("pangospodar-reviews");
 }
 
 export async function submitReview(
