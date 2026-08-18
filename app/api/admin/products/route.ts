@@ -3,6 +3,7 @@ import {
   ensureProductsTable,
   hasDatabase,
   sanitizeAttributes,
+  sanitizeDescription,
   sanitizeImageList,
   updateProductFromAdmin,
 } from "@/lib/db";
@@ -82,6 +83,11 @@ export async function POST(request: Request) {
       imageUrl: String(payload.imageUrl ?? "").trim(),
       images: sanitizeImageList(payload.images),
       barcode: String(payload.barcode ?? "").trim(),
+      // `shortDescription` is what the field is called on `Product`; the older
+      // `description` is accepted too so a hand-written request keeps working.
+      description: sanitizeDescription(
+        payload.shortDescription ?? payload.description,
+      ),
       attributes: sanitizeAttributes(payload.attributes),
       isPromo: payload.isPromo === true,
       isBestseller: payload.isBestseller === true,

@@ -119,6 +119,10 @@ export function ProductsProvider({
           // in step, so sending the whole list is enough.
           images: getProductImages(product),
           barcode: product.barcode ?? "",
+          // The form's "Опис" box. Sent under the name it has on `Product` —
+          // leaving it out of this body is what used to make the field look
+          // like it saved and then come back empty.
+          shortDescription: product.shortDescription ?? "",
           attributes: product.attributes ?? {},
           isPromo: product.isPromo === true,
           isBestseller: product.isBestseller === true,

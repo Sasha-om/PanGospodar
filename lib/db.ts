@@ -339,9 +339,26 @@ export interface AdminProductUpdate {
   images: string[];
   /** Empty string clears the barcode (stored as NULL). */
   barcode: string;
+  /** Marketing copy. Empty string clears it (stored as NULL — see below). */
+  description: string;
   attributes: Record<string, string>;
   isPromo: boolean;
   isBestseller: boolean;
+}
+
+/**
+ * Longest description the admin form may store.
+ *
+ * Not a database limit — `text` has none — but a payload one: `/api/products`
+ * ships the whole catalog, descriptions included, to every visitor's browser.
+ * A pasted page of HTML in one row is paid for on every page load by everyone.
+ */
+export const MAX_DESCRIPTION_LENGTH = 4000;
+
+export function sanitizeDescription(raw: unknown): string {
+  return typeof raw === "string"
+    ? raw.trim().slice(0, MAX_DESCRIPTION_LENGTH)
+    : "";
 }
 
 /**
@@ -365,11 +382,20 @@ export async function updateProductFromAdmin(
   // its first entry so the two columns can never disagree about the main photo.
   const images = sanitizeImageList([update.imageUrl, ...update.images]);
   const imageUrl = images[0] ?? update.imageUrl.trim();
+  /*
+   * NULL rather than '' for an empty box, and the difference is not cosmetic:
+   * `description` carries three states (see `ensureProductsTable`), where ''
+   * means "already looked at, nothing reliable to say" and permanently excludes
+   * the row from `scripts/generate-descriptions.ts`. An admin who clears the
+   * field is saying "there is no description here", not "never write one" — so
+   * the row goes back to pending instead.
+   */
+  const description = update.description.trim() || null;
 
   await sql`
     INSERT INTO products (
       sku, name, price, stock, brand, category, image_url, images, barcode,
-      attributes, is_promo, is_bestseller, updated_at
+      description, attributes, is_promo, is_bestseller, updated_at
     )
     VALUES (
       ${update.sku},
@@ -381,6 +407,7 @@ export async function updateProductFromAdmin(
       ${imageUrl},
       ${JSON.stringify(images)}::jsonb,
       ${barcode},
+      ${description},
       ${JSON.stringify(update.attributes)}::jsonb,
       ${update.isPromo},
       ${update.isBestseller},
@@ -395,6 +422,7 @@ export async function updateProductFromAdmin(
       image_url     = EXCLUDED.image_url,
       images        = EXCLUDED.images,
       barcode       = EXCLUDED.barcode,
+      description   = EXCLUDED.description,
       attributes    = EXCLUDED.attributes,
       is_promo      = EXCLUDED.is_promo,
       is_bestseller = EXCLUDED.is_bestseller,
