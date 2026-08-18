@@ -1,18 +1,10 @@
 import Image from "next/image";
 import Link from "next/link";
 import { Boxes, Check, ShieldCheck, Truck } from "lucide-react";
-import BrandShowcase from "@/components/BrandShowcase";
 import HeroShowcase from "@/components/HeroShowcase";
 import PaymentBadges from "@/components/PaymentBadges";
 import RecommendedProducts from "@/components/RecommendedProducts";
 import TrustedBrands from "@/components/TrustedBrands";
-
-/**
- * The brand the shop leads with. The showcase disappears by itself if the
- * catalog holds nothing of it, so this is safe to keep set while the catalog
- * is still being filled.
- */
-const FEATURED_BRAND = "STIHL";
 
 const heroChecks = [
   "Оплата при отриманні",
@@ -162,13 +154,7 @@ export default function Home() {
       <TrustedBrands />
 
       <main className="flex-1">
-        {/* The dealer shelf first, then everything else — see BrandShowcase. */}
-        <BrandShowcase
-          brand={FEATURED_BRAND}
-          title="Офіційна техніка STIHL"
-          subtitle="Бензопили, мотокоси, кущорізи та оригінальні витратні матеріали. Перевірка перед відправкою, гарантія до 24 місяців, сервіс у Ратному."
-        />
-        <RecommendedProducts excludeBrand={FEATURED_BRAND} />
+        <RecommendedProducts />
       </main>
     </div>
   );
