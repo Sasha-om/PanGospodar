@@ -1900,6 +1900,15 @@ export async function consumePasswordReset(
 
 /* ------------------------------ favorites -------------------------------- */
 
+/**
+ * `RootLayout` calls this on every single page (to render the heart icon in
+ * its true state on first paint), unguarded. It used to rethrow any error
+ * that wasn't "table missing" — so a database hiccup unrelated to favourites
+ * (Neon over its data-transfer quota, a dropped connection, a timeout) took
+ * down every page for any signed-in customer, catalog included, instead of
+ * just leaving the heart icon unfilled. Matches the fallback `readStoreSettings`
+ * already uses: never break the whole site over a read this optional.
+ */
 export async function listFavorites(customerId: number): Promise<string[]> {
   const sql = getSql();
   try {
@@ -1910,7 +1919,12 @@ export async function listFavorites(customerId: number): Promise<string[]> {
     `) as { product_sku: string }[];
     return rows.map((row) => row.product_sku);
   } catch (caught) {
-    if (!isMissingSchemaError(caught)) throw caught;
+    if (isMissingSchemaError(caught)) {
+      return [];
+    }
+    console.error(
+      `[favorites] Read failed: ${caught instanceof Error ? caught.message : String(caught)}`,
+    );
     return [];
   }
 }
