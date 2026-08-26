@@ -85,7 +85,7 @@ export async function deleteCustomerSession(): Promise<void> {
  * one that cannot.
  *
  * The generation check fails **open** on a database error: the shop is
- * browsable without a database, and a Neon hiccup must not sign every customer
+ * browsable without a database, and a Turso hiccup must not sign every customer
  * out. It fails **closed** on a deleted account (`null` epoch), because there
  * is nothing left for the session to refer to.
  */

@@ -34,6 +34,12 @@ yarn-error.log*
 .env*
 !.env.example
 
+# local libSQL/SQLite databases (TURSO_DATABASE_URL="file:local.db")
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # vercel
 .vercel
 

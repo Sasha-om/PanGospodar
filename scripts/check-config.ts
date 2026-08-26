@@ -50,11 +50,23 @@ function section(title: string): void {
 
 section("Обов'язкове");
 
-const dbVar = CONNECTION_ENV_VARS.find((name) => isSet(name));
+const [dbUrlVar, dbTokenVar] = CONNECTION_ENV_VARS;
+const dbUrl = value(dbUrlVar);
+// A local `file:` database is a valid setup and needs no token; a remote one
+// does, and silently failing to authenticate is the confusing case worth
+// calling out here.
+const isLocalFile = dbUrl.startsWith("file:");
+const hasToken = isSet(dbTokenVar);
 report(
-  dbVar ? "ok" : "fail",
-  "База даних",
-  dbVar ? `рядок підключення у ${dbVar}` : `не задано жодної з: ${CONNECTION_ENV_VARS.slice(0, 3).join(", ")}…`,
+  dbUrl ? (isLocalFile || hasToken ? "ok" : "warn") : "fail",
+  "База даних (Turso)",
+  !dbUrl
+    ? `не задано ${dbUrlVar}`
+    : isLocalFile
+      ? `локальний файл (${dbUrl}) — токен не потрібен`
+      : hasToken
+        ? `${dbUrlVar} + ${dbTokenVar}`
+        : `${dbUrlVar} задано, але ${dbTokenVar} порожній`,
 );
 
 const secret = value("SESSION_SECRET");

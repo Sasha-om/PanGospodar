@@ -320,7 +320,7 @@ export default function AdminPage() {
                   aria-hidden="true"
                 />
                 {source === "database"
-                  ? "Каталог завантажено з бази даних (Neon Postgres)."
+                  ? "Каталог завантажено з бази даних (Turso)."
                   : source === "ukrsklad"
                     ? "Каталог синхронізовано з файлом обліковою системи УкрСклад."
                     : "Джерело даних недоступне — каталог порожній."}

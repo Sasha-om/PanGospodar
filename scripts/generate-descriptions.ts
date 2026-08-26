@@ -305,7 +305,7 @@ async function main() {
   }
   if (!hasDatabase()) {
     console.error(
-      "✗ Немає рядка підключення до бази. Задайте STORAGE_DATABASE_URL у .env.local.",
+      "✗ Немає підключення до бази. Задайте TURSO_DATABASE_URL у .env.local.",
     );
     process.exit(1);
   }
