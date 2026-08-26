@@ -109,9 +109,12 @@ export function mapCategory(rawGroup: string): string {
  * Ordered name patterns behind `inferCategory`, as data.
  *
  * Kept as plain alternation strings rather than inline regex literals so the
- * admin catalog filter can rebuild the identical rules as Postgres `~*`
- * expressions — the category column is empty for the whole catalog, so
- * filtering has to reproduce this inference rather than read a stored value.
+ * admin catalog filter can rebuild the identical rules in SQL — the category
+ * column is empty for the whole catalog, so filtering has to reproduce this
+ * inference rather than read a stored value. SQLite ships no regex function,
+ * so `derivedProducts` in `lib/db.ts` splits each pattern on `|` and matches
+ * the alternatives with `LIKE`; keep every alternative a plain literal, with
+ * no regex metacharacters, or that translation stops being faithful.
  * Anything that matches nothing falls through to `consumables`.
  */
 export const CATEGORY_RULES: { slug: string; pattern: string }[] = [

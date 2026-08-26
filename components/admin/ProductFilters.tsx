@@ -8,7 +8,7 @@ import type { AdminFacets } from "@/lib/db";
 /**
  * Catalog filters for the admin product list.
  *
- * The list is paged in Postgres (20 rows at a time), so these are *query
+ * The list is paged in the database (20 rows at a time), so these are *query
  * parameters*, not a client-side filter over the loaded rows — filtering in the
  * browser would only ever narrow the visible page.
  */

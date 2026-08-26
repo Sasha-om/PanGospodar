@@ -22,7 +22,7 @@ const labelClass =
  *
  * The admin panel is a client component, so the current values are fetched
  * from /api/admin/settings; saving goes through a Server Action that writes to
- * Postgres and revalidates the site.
+ * the database and revalidates the site.
  */
 export default function StoreSettingsForm() {
   const [state, formAction, isPending] = useActionState<

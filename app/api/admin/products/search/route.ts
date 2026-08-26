@@ -5,7 +5,7 @@ import { getSession } from "@/lib/session";
  * GET /api/admin/products/search?q=&limit=20&offset=0
  *
  * Paged catalog search for the admin table. Filtering and paging happen in
- * Postgres, so the browser receives at most `limit` rows instead of the whole
+ * the database, so the browser receives at most `limit` rows instead of the whole
  * catalog.
  *
  * Guarded by the admin session cookie, like the other /api/admin routes.

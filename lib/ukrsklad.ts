@@ -18,7 +18,7 @@ import {
  * Supports XML, JSON and CSV exports (УкрСклад CSV is UTF-16 LE, `;`-delimited).
  * Reads a local file (or a folder containing one) from `UKR_SKLAD_FILE_PATH`.
  *
- * This is the legacy/offline source — Postgres is the production source of
+ * This is the legacy/offline source — Turso is the production source of
  * truth. See `lib/catalog.ts`, which picks between them.
  */
 

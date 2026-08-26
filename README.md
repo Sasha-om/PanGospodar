@@ -29,7 +29,8 @@ npm run dev
 
 | Змінна | Обов'язкова | Опис |
 |---|---|---|
-| `STORAGE_DATABASE_URL` | **так** | Рядок підключення до Neon (додає інтеграція Vercel). Перевіряються також `STORAGE_POSTGRES_URL`, `POSTGRES_URL`, `DATABASE_URL` та ін. |
+| `TURSO_DATABASE_URL` | **так** | Адреса бази Turso (`libsql://…`). Для локальної спроби без акаунта — `file:local.db`. На Vercel інтеграція створює її як `STORAGE_TURSO_DATABASE_URL` — код приймає обидва написання |
+| `TURSO_AUTH_TOKEN` | **так*** | Токен доступу до Turso (на Vercel — `STORAGE_TURSO_AUTH_TOKEN`). *Не потрібен лише для локального `file:`-варіанта |
 | `IMPORT_TOKEN` | **так** | Спільний секрет для `/api/import-stock`. Згенерувати: `openssl rand -hex 32` |
 | `SESSION_SECRET` | **так** | Ключ підпису cookie сесії. Згенерувати: `openssl rand -base64 32` |
 | `ADMIN_PASSWORD` | **так** | Пароль до `/admin` |
@@ -49,25 +50,56 @@ npm run dev
 
 ## Крок 0. Джерело товарів — база даних
 
-Каталог береться з **Neon Postgres** (таблиця `products`). Порядок джерел
-задано в [`lib/catalog.ts`](lib/catalog.ts):
+Каталог береться з **Turso** (libSQL/SQLite, таблиця `products`). Порядок
+джерел задано в [`lib/catalog.ts`](lib/catalog.ts):
 
-1. **Postgres** — основне джерело (якщо задано `POSTGRES_URL` / `STORAGE_URL`)
+1. **Turso** — основне джерело (якщо задано `TURSO_DATABASE_URL`)
 2. Локальний файл `UKR_SKLAD_FILE_PATH` — резерв для офлайн-роботи
 3. Порожній каталог — якщо нічого не налаштовано (сайт не падає)
 
+### Налаштування бази
+
+```bash
+turso db create panhospodar
+turso db show panhospodar --url      # -> TURSO_DATABASE_URL
+turso db tokens create panhospodar   # -> TURSO_AUTH_TOKEN
+```
+
+Обидва значення — у `.env.local` (і в змінні проєкту на Vercel). Якщо базу
+підключено через інтеграцію Vercel, змінні там уже названі
+`STORAGE_TURSO_DATABASE_URL` і `STORAGE_TURSO_AUTH_TOKEN` — перейменовувати не
+треба, код перевіряє спершу їх, а потім варіанти без префікса.
+
+Далі створити таблиці:
+
+```bash
+npm run db:push
+```
+
+Схема описана в [`lib/schema.ts`](lib/schema.ts) (Drizzle, діалект SQLite) —
+це єдине джерело правди. `npm run db:generate` створює версіоновані міграції в
+`drizzle/`, якщо вони потрібні.
+
 ### Таблиця `products`
 
-Створюється автоматично при першому імпорті. Схема —
-[`sql/001_products.sql`](sql/001_products.sql):
+Створюється командою `npm run db:push` (а якщо база порожня — ще й автоматично
+при першому запиті). Схема — [`lib/schema.ts`](lib/schema.ts):
 
 | Колонка | Тип | Опис |
 |---|---|---|
 | `sku` | `text` PRIMARY KEY | Артикул |
 | `name` | `text` | Назва |
-| `price` | `numeric` | Ціна |
-| `stock` | `numeric` | Залишок |
-| `updated_at` | `timestamptz` | Оновлюється автоматично |
+| `name_lower` | `text` | Назва у нижньому регістрі — для пошуку кирилицею |
+| `price` | `real` | Ціна |
+| `stock` | `real` | Залишок (є `CHECK (stock >= 0)`) |
+| `barcode` | `text` | Штрихкод |
+| `barcode_digits` | `text` | Лише цифри штрихкоду — для пошуку сканером |
+| `attributes` | `text` (JSON) | Характеристики |
+| `images` | `text` (JSON) | Галерея фото |
+| `updated_at` | `text` (ISO-8601) | Оновлюється автоматично |
+
+> SQLite не має типів `jsonb`, `boolean` і `timestamptz`: JSON зберігається
+> текстом, прапорці — числами `0`/`1`, час — текстом у форматі ISO-8601.
 
 ### Завантаження товарів: `POST /api/import-stock`
 

@@ -1,5 +1,21 @@
-import { neon } from "@neondatabase/serverless";
 import { unstable_cache } from "next/cache";
+import {
+  ago,
+  fromJson,
+  getDatabaseUrl,
+  hasTurso,
+  isCheckViolation,
+  isMissingSchema,
+  isUniqueViolation as isLibsqlUniqueViolation,
+  jsonRows,
+  now,
+  sql,
+  toBool,
+  TURSO_TOKEN_ENV_VARS,
+  TURSO_URL_ENV_VARS,
+  getDatabaseUrlSource,
+  type SqlQuery,
+} from "@/lib/libsql";
 import { MAX_PRODUCT_IMAGES, type Product } from "@/lib/products";
 import {
   DEFAULT_STORE_SETTINGS,
@@ -36,75 +52,83 @@ import {
 } from "@/lib/product-mapping";
 
 /**
- * Neon Postgres access for the product catalog.
+ * Turso (libSQL/SQLite) access for the product catalog.
  *
- * The connection string is read from the first environment variable that is
- * set — Vercel's Neon integration provisions `POSTGRES_URL`, while some setups
- * expose `STORAGE_URL` or `DATABASE_URL` instead.
+ * The connection is configured with `TURSO_DATABASE_URL` and, for a remote
+ * database, `TURSO_AUTH_TOKEN`. The statements below are hand-written SQL run
+ * through the tagged-template wrapper in `lib/libsql.ts`; `lib/schema.ts` is
+ * the declarative source of truth for the tables themselves, applied with
+ * `npm run db:push`.
+ *
+ * Notes that apply throughout, all of them consequences of SQLite not being
+ * Postgres:
+ *
+ *  - Timestamps are ISO-8601 **text** (see `NOW` / `ago`), which sorts and
+ *    compares chronologically without a date type.
+ *  - JSON lives in `text` columns, read with `json_each` / `json_extract` and
+ *    merged with `json_patch`, so `fromJson` parses it on the way out.
+ *  - Booleans are 0/1 integers, so reads go through `toBool`.
+ *  - Where Postgres took an array parameter (`${skus}::text[]`), the array is
+ *    now bound as JSON and expanded with `json_each(?)`.
  */
 
 /**
- * Checked in order. The Vercel↔Neon integration on this project provisions the
- * `STORAGE_`-prefixed names, so those come first; the unprefixed variants are
- * kept for other setups and local development.
+ * Env vars that configure the database, URL candidates first.
+ *
+ * Two spellings of each: the Vercel↔Turso integration provisions the
+ * `STORAGE_`-prefixed names, while a hand-written `.env.local` uses the plain
+ * ones. Kept as a list because several call sites report "set one of these"
+ * to the operator when nothing is configured.
  */
 export const CONNECTION_ENV_VARS = [
-  "STORAGE_DATABASE_URL",
-  "STORAGE_POSTGRES_URL",
-  "STORAGE_POSTGRES_URL_NON_POOLING",
-  "POSTGRES_URL",
-  "DATABASE_URL",
-  "STORAGE_URL",
-  "POSTGRES_URL_NON_POOLING",
-  "POSTGRES_PRISMA_URL",
+  ...TURSO_URL_ENV_VARS,
+  ...TURSO_TOKEN_ENV_VARS,
 ] as const;
 
-/** Name of the env var that supplied the connection string (for diagnostics). */
+/** Env vars that can supply the URL, most specific first. */
+export const CONNECTION_URL_ENV_VARS = TURSO_URL_ENV_VARS;
+/** Env vars that can supply the auth token. */
+export const CONNECTION_TOKEN_ENV_VARS = TURSO_TOKEN_ENV_VARS;
+
+/** Name of the env var that supplied the connection (for diagnostics). */
 export function getConnectionSource(): string | undefined {
-  return CONNECTION_ENV_VARS.find((key) => process.env[key]?.trim());
+  return getDatabaseUrlSource();
 }
 
 export function getConnectionString(): string | undefined {
-  const key = getConnectionSource();
-  return key ? process.env[key]?.trim() : undefined;
+  return getDatabaseUrl();
 }
 
-/** True when a Postgres connection string is configured. */
+/** True when a Turso connection is configured. */
 export function hasDatabase(): boolean {
-  return getConnectionString() !== undefined;
+  return hasTurso();
 }
 
-function getSql() {
-  const connectionString = getConnectionString();
-  if (!connectionString) {
-    throw new Error(
-      `No database connection string. Set one of: ${CONNECTION_ENV_VARS.join(", ")}`,
-    );
-  }
-  return neon(connectionString);
-}
-
-/** Row shape of the `products` table. `numeric` comes back as a string. */
 /**
  * Row of the `products` table. Every column except sku/name is optional here:
  * the table gains columns over time, and reading must not break when the
  * database has not been migrated yet (`SELECT *` simply omits them).
+ *
+ * `attributes` and `images` arrive as JSON **text**, and the two flags as 0/1
+ * integers — SQLite has neither a JSON nor a boolean type — so `rowToProduct`
+ * puts them through `fromJson` and `toBool` rather than using them directly.
  */
 interface ProductRow {
   sku: string;
   name: string;
   price?: string | number | null;
   stock?: string | number | null;
-  attributes?: Record<string, unknown> | null;
+  /** JSON text: an object of spec name to value. */
+  attributes?: unknown;
   category?: string | null;
   brand?: string | null;
   image_url?: string | null;
-  /** `images` JSONB — an array of photo URLs, the main one first. */
+  /** JSON text: an array of photo URLs, the main one first. */
   images?: unknown;
   barcode?: string | null;
   description?: string | null;
-  is_promo?: boolean | null;
-  is_bestseller?: boolean | null;
+  is_promo?: number | null;
+  is_bestseller?: number | null;
 }
 
 /** Keep only non-empty string pairs — the UI and filters assume clean data. */
@@ -162,88 +186,69 @@ function toNumber(value: string | number | null | undefined): number {
 }
 
 /**
- * Create the `products` table if it does not exist yet. Safe to call on every
- * import request — `IF NOT EXISTS` makes it a no-op once the table is there.
+ * A barcode reduced to its digits, stored alongside the raw value.
+ *
+ * The admin search matches a scanned code against this so spaces and dashes in
+ * either the stored value or the query do not prevent a match. Postgres did it
+ * in the query with `regexp_replace`; SQLite ships no regex function, so the
+ * normalized form is computed here and written to `products.barcode_digits`.
+ */
+function digitsOf(value: string | null | undefined): string {
+  return (value ?? "").replace(/[^0-9]/g, "");
+}
+
+/**
+ * Case-folded product name, stored in `products.name_lower`.
+ *
+ * SQLite's `lower()` and case-insensitive `LIKE` only fold ASCII, so neither
+ * helps a Cyrillic catalogue. JavaScript's `toLowerCase` is Unicode-aware, so
+ * the folding happens on write and the search compares folded to folded.
+ */
+function foldCase(value: string | null | undefined): string {
+  return (value ?? "").toLowerCase();
+}
+
+/**
+ * Create the `products` table if it does not exist yet.
+ *
+ * `lib/schema.ts` is the source of truth for this shape and `npm run db:push`
+ * is how it is normally applied; this mirrors it so that a request hitting an
+ * empty database still self-heals instead of failing (see `loadProductsFromDb`).
+ * Keep the two in step when adding a column.
  */
 export async function ensureProductsTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS products (
-      sku        text PRIMARY KEY,
-      name       text NOT NULL,
-      price      numeric,
-      stock      numeric,
-      updated_at timestamptz NOT NULL DEFAULT now()
+      sku            text PRIMARY KEY,
+      name           text NOT NULL,
+      name_lower     text NOT NULL DEFAULT '',
+      price          real,
+      stock          real,
+      attributes     text NOT NULL DEFAULT '{}',
+      category       text,
+      brand          text,
+      image_url      text,
+      images         text NOT NULL DEFAULT '[]',
+      barcode        text,
+      barcode_digits text NOT NULL DEFAULT '',
+      description    text,
+      is_promo       integer NOT NULL DEFAULT 0,
+      is_bestseller  integer NOT NULL DEFAULT 0,
+      updated_at     text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      -- Stock can never go below zero. This is the guard that makes overselling
+      -- impossible: two checkouts racing for the last item both try to write a
+      -- negative value, SQLite rejects the second, and its whole transaction --
+      -- order row included -- rolls back. SQLite can only declare a CHECK when
+      -- the table is created, so unlike the Postgres version this is not added
+      -- afterwards.
+      CONSTRAINT products_stock_non_negative CHECK (stock >= 0)
     )
   `;
-  // Added after the initial release — safe to run on existing databases.
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS attributes jsonb NOT NULL DEFAULT '{}'::jsonb
-  `;
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS category text
-  `;
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS brand text
-  `;
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS image_url text
-  `;
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS barcode text
-  `;
-  // Every photo of the product, main one first — `image_url` keeps holding that
-  // first entry so all the older readers (cards, cart, feeds) keep working on a
-  // database where this column is still empty.
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS images jsonb NOT NULL DEFAULT '[]'::jsonb
-  `;
-  // Marketing copy, written by the admin or by scripts/generate-descriptions.ts.
-  // Three states, and the difference matters to that script: NULL means "not
-  // looked at yet", empty string means "looked at, nothing reliable to say"
-  // (so it is never retried), and text is a real description.
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS description text
-  `;
   // Barcode lookups are exact-match, so a plain index is enough.
-  await sql`
-    CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)
-  `;
-  // Merchandising markers set in the admin panel. Like brand/category/image_url
-  // these are admin-owned: `upsertProducts` never writes them, so they survive
-  // every УкрСклад synchronization.
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS is_promo boolean NOT NULL DEFAULT false
-  `;
-  await sql`
-    ALTER TABLE products
-    ADD COLUMN IF NOT EXISTS is_bestseller boolean NOT NULL DEFAULT false
-  `;
-  // Stock can never go below zero. This is the guard that makes overselling
-  // impossible: two checkouts racing for the last item both try to write a
-  // negative value, Postgres rejects the second, and its whole transaction —
-  // order row included — rolls back. NOT VALID skips the scan of existing rows
-  // (an older import may have left negatives behind); every write from here on
-  // is still checked. Postgres has no ADD CONSTRAINT IF NOT EXISTS, hence the
-  // block that swallows the "already there" error on later calls.
-  await sql`
-    DO $$
-    BEGIN
-      ALTER TABLE products
-        ADD CONSTRAINT products_stock_non_negative CHECK (stock >= 0) NOT VALID;
-    EXCEPTION
-      WHEN duplicate_object THEN NULL;
-    END
-    $$
-  `;
+  await sql`CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode)`;
+  // The admin search scans the digits-only barcode and the case-folded name.
+  await sql`CREATE INDEX IF NOT EXISTS products_barcode_digits_idx ON products (barcode_digits)`;
+  await sql`CREATE INDEX IF NOT EXISTS products_name_lower_idx ON products (name_lower)`;
 }
 
 /** Map a database row onto the site's `Product` shape. */
@@ -257,7 +262,7 @@ function rowToProduct(row: ProductRow): Product {
   const storedBarcode = (row.barcode ?? "").trim();
   // The gallery, with the main photo resolved from it when `image_url` is empty
   // (older rows) and the main photo never repeated inside `images`.
-  const gallery = sanitizeImageList(row.images);
+  const gallery = sanitizeImageList(fromJson<unknown[]>(row.images, []));
   const mainImage = storedImage || gallery[0] || LOCAL_PLACEHOLDER;
   const extraImages = gallery.filter((url) => url !== mainImage);
 
@@ -273,27 +278,24 @@ function rowToProduct(row: ProductRow): Product {
     inStock: quantity > 0,
     shortDescription: (row.description ?? "").trim(),
     techSpecs: { power: "", weight: "", warranty: "" },
-    attributes: sanitizeAttributes(row.attributes),
+    attributes: sanitizeAttributes(fromJson<Record<string, unknown>>(row.attributes, {})),
     imageUrl: mainImage,
     // Left out entirely when there is only one photo, so the common product
     // carries no extra field through the API payload.
     ...(extraImages.length > 0 ? { images: extraImages } : {}),
     categorySlug: safeCategorySlug(storedCategory || inferCategory(name)),
-    isPromo: row.is_promo === true,
-    isBestseller: row.is_bestseller === true,
+    isPromo: toBool(row.is_promo),
+    isBestseller: toBool(row.is_bestseller),
   };
 }
 
 /** Does this error mean the table or one of its columns is missing? */
 function isMissingSchemaError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /does not exist|undefined column|undefined table|relation .* does not exist/i.test(
-    message,
-  );
+  return isMissingSchema(error);
 }
 
 /**
- * Read the whole catalog from Postgres.
+ * Read the whole catalog from Turso.
  *
  * Uses `SELECT *` on purpose: the table gains columns over releases, and a
  * fixed column list would throw on a database that has not been migrated yet,
@@ -302,10 +304,9 @@ function isMissingSchemaError(error: unknown): boolean {
  * of needing a manual SQL step.
  */
 export async function loadProductsFromDb(): Promise<Product[]> {
-  const sql = getSql();
 
   const read = async () =>
-    (await sql`SELECT * FROM products ORDER BY name`) as ProductRow[];
+    (await sql`SELECT * FROM products ORDER BY name`) as unknown as ProductRow[];
 
   let rows: ProductRow[];
   try {
@@ -372,7 +373,6 @@ export function sanitizeDescription(raw: unknown): string {
 export async function updateProductFromAdmin(
   update: AdminProductUpdate,
 ): Promise<void> {
-  const sql = getSql();
   // The admin owns this field, so an empty box genuinely means "no barcode".
   const barcode = update.barcode.trim() === "" ? null : update.barcode.trim();
   // `products_stock_non_negative` would reject a negative; a negative on-hand
@@ -394,57 +394,66 @@ export async function updateProductFromAdmin(
 
   await sql`
     INSERT INTO products (
-      sku, name, price, stock, brand, category, image_url, images, barcode,
-      description, attributes, is_promo, is_bestseller, updated_at
+      sku, name, name_lower, price, stock, brand, category, image_url, images,
+      barcode, barcode_digits, description, attributes, is_promo, is_bestseller,
+      updated_at
     )
     VALUES (
       ${update.sku},
       ${update.name},
+      ${foldCase(update.name)},
       ${update.price},
       ${stock},
       ${update.brand},
       ${update.category},
       ${imageUrl},
-      ${JSON.stringify(images)}::jsonb,
+      ${JSON.stringify(images)},
       ${barcode},
+      ${digitsOf(barcode)},
       ${description},
-      ${JSON.stringify(update.attributes)}::jsonb,
+      ${JSON.stringify(update.attributes)},
       ${update.isPromo},
       ${update.isBestseller},
-      now()
+      ${now()}
     )
     ON CONFLICT (sku) DO UPDATE SET
-      name          = EXCLUDED.name,
-      price         = EXCLUDED.price,
-      stock         = EXCLUDED.stock,
-      brand         = EXCLUDED.brand,
-      category      = EXCLUDED.category,
-      image_url     = EXCLUDED.image_url,
-      images        = EXCLUDED.images,
-      barcode       = EXCLUDED.barcode,
-      description   = EXCLUDED.description,
-      attributes    = EXCLUDED.attributes,
-      is_promo      = EXCLUDED.is_promo,
-      is_bestseller = EXCLUDED.is_bestseller,
-      updated_at    = now()
+      name           = excluded.name,
+      name_lower     = excluded.name_lower,
+      price          = excluded.price,
+      stock          = excluded.stock,
+      brand          = excluded.brand,
+      category       = excluded.category,
+      image_url      = excluded.image_url,
+      images         = excluded.images,
+      barcode        = excluded.barcode,
+      barcode_digits = excluded.barcode_digits,
+      description    = excluded.description,
+      attributes     = excluded.attributes,
+      is_promo       = excluded.is_promo,
+      is_bestseller  = excluded.is_bestseller,
+      updated_at     = excluded.updated_at
   `;
 }
 
 /** Remove a product entirely. */
 export async function deleteProductBySku(sku: string): Promise<void> {
-  const sql = getSql();
   await sql`DELETE FROM products WHERE sku = ${sku}`;
 }
 
 /* ------------------------------- orders --------------------------------- */
 
-/** Create the `orders` table if it does not exist. Idempotent. */
+/**
+ * Create the `orders` table if it does not exist. Idempotent.
+ *
+ * Mirrors `lib/schema.ts` — see the note on `ensureProductsTable`.
+ */
 export async function ensureOrdersTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS orders (
-      id              serial PRIMARY KEY,
+      id              integer PRIMARY KEY AUTOINCREMENT,
       status          text NOT NULL DEFAULT 'NEW',
+      -- How the order was placed: cart checkout, "Купити" or "Зарезервувати".
+      type            text NOT NULL DEFAULT 'CART',
       first_name      text NOT NULL,
       last_name       text NOT NULL,
       phone           text NOT NULL,
@@ -454,48 +463,28 @@ export async function ensureOrdersTable(): Promise<void> {
       warehouse       text NOT NULL,
       payment_method  text NOT NULL,
       comment         text,
-      items           jsonb NOT NULL DEFAULT '[]'::jsonb,
-      total           numeric NOT NULL DEFAULT 0,
-      created_at      timestamptz NOT NULL DEFAULT now()
+      items           text NOT NULL DEFAULT '[]',
+      total           real NOT NULL DEFAULT 0,
+      -- Whether this order currently holds a stock reservation — the flag that
+      -- makes status changes idempotent. Only a transition that actually flips
+      -- it moves products.stock, so restocking twice is impossible no matter
+      -- how often "Скасувати" is pressed.
+      stock_applied   integer NOT NULL DEFAULT 0,
+      -- Salted hash of the submitter's IP — never a real address — purely so
+      -- countRecentOrdersByIp can throttle a script that floods orders to
+      -- drain stock or spam the seller's Telegram/email.
+      ip_hash         text NOT NULL DEFAULT '',
+      -- Orders placed while signed in are owned outright; older ones are
+      -- matched by phone/email at read time (see listOrdersForCustomer).
+      customer_id     integer REFERENCES customers(id) ON DELETE SET NULL,
+      created_at      text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
   `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC)
-  `;
-  // Whether this order currently holds a stock reservation — the flag that
-  // makes status changes idempotent. Only a transition that actually flips it
-  // moves `products.stock`, so restocking twice is impossible no matter how
-  // often "Скасувати" is pressed. Rows that predate stock tracking default to
-  // `false`: their stock was never deducted, so cancelling them must not credit
-  // quantities back that never left.
-  await sql`
-    ALTER TABLE orders
-    ADD COLUMN IF NOT EXISTS stock_applied boolean NOT NULL DEFAULT false
-  `;
-  // How the order was placed: cart checkout, "Купити" or "Зарезервувати".
-  // Rows that predate the product-page buttons are all cart checkouts, which
-  // is exactly what the default backfills them to.
-  await sql`
-    ALTER TABLE orders
-    ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'CART'
-  `;
-  // "Купують разом" matches baskets with `items @> '[{"sku": "..."}]'`.
-  await sql`
-    CREATE INDEX IF NOT EXISTS orders_items_gin_idx
-    ON orders USING gin (items jsonb_path_ops)
-  `;
-  // Salted hash of the submitter's IP — never a real address — purely so
-  // `countRecentOrdersByIp` can throttle a script that floods orders to drain
-  // stock or spam the seller's Telegram/email. Empty for rows written before
-  // this column existed, or when there was no address to key on.
-  await sql`
-    ALTER TABLE orders
-    ADD COLUMN IF NOT EXISTS ip_hash text NOT NULL DEFAULT ''
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS orders_ip_hash_created_idx
-    ON orders (ip_hash, created_at DESC)
-  `;
+  await sql`CREATE INDEX IF NOT EXISTS orders_created_at_idx ON orders (created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS orders_ip_hash_created_idx ON orders (ip_hash, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS orders_customer_idx ON orders (customer_id)`;
+  // "Купують разом" scans baskets by status before unpacking their JSON.
+  await sql`CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (status)`;
 }
 
 interface OrderRow {
@@ -511,9 +500,11 @@ interface OrderRow {
   warehouse: string;
   payment_method: string;
   comment: string | null;
+  /** JSON text: the basket lines. */
   items: unknown;
   total: string | number | null;
   created_at: string | Date;
+  stock_applied?: number | null;
 }
 
 function rowToOrder(row: OrderRow): Order {
@@ -530,8 +521,9 @@ function rowToOrder(row: OrderRow): Order {
     warehouse: row.warehouse ?? "",
     paymentMethod: row.payment_method as Order["paymentMethod"],
     comment: row.comment ?? "",
-    items: Array.isArray(row.items) ? (row.items as OrderItem[]) : [],
+    items: fromJson<OrderItem[]>(row.items, []),
     total: toNumber(row.total),
+    // Stored as ISO-8601 text already, so no conversion is needed.
     createdAt:
       row.created_at instanceof Date
         ? row.created_at.toISOString()
@@ -555,9 +547,12 @@ function rowToOrder(row: OrderRow): Order {
  *     that would oversell. Because the write happens inside a transaction with
  *     the order row, the rejection rolls the order back too.
  *
- * The Neon HTTP driver has no interactive transactions — statements cannot be
- * chosen based on earlier results — so each step below is written as a single
- * self-contained statement and the steps are submitted with `sql.transaction()`.
+ * libSQL does have interactive transactions, so unlike the Neon HTTP driver it
+ * can read and then decide what to write inside one. That matters here: SQLite
+ * has no data-modifying CTE (`WITH x AS (UPDATE … RETURNING)`), which is how
+ * the Postgres version claimed the reservation flag and moved stock in a single
+ * statement. `sql.begin()` replaces those with a read and a write in one
+ * transaction, which is atomic for the same reason.
  */
 
 let stockSchemaReady: Promise<void> | null = null;
@@ -607,14 +602,9 @@ function toStockLines(items: OrderItem[]): StockLine[] {
   return [...totals].map(([sku, quantity]) => ({ sku, quantity }));
 }
 
-/** Did Postgres reject this write because it would oversell? */
+/** Did SQLite reject this write because it would oversell? */
 function isStockConstraintError(error: unknown): boolean {
-  const detail = error as { code?: string; constraint?: string } | null;
-  if (detail?.code === "23514" || detail?.constraint === "products_stock_non_negative") {
-    return true;
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("products_stock_non_negative");
+  return isCheckViolation(error, "products_stock_non_negative");
 }
 
 /**
@@ -630,20 +620,25 @@ export async function findStockShortages(
   if (lines.length === 0) {
     return [];
   }
-  const sql = getSql();
+  // Postgres took two parallel arrays through `UNNEST(…::text[], …::numeric[])`.
+  // SQLite has no array type, so the lines travel as one JSON array of objects
+  // and `json_each` unpacks them into rows.
   const rows = (await sql`
     SELECT
-      t.sku,
-      COALESCE(p.name, '')          AS name,
-      COALESCE(p.stock, 0)::float8  AS available,
-      t.qty::float8                 AS required
-    FROM UNNEST(
-      ${lines.map((line) => line.sku)}::text[],
-      ${lines.map((line) => line.quantity)}::numeric[]
-    ) AS t(sku, qty)
-    LEFT JOIN products p ON p.sku = t.sku
-    WHERE p.sku IS NULL OR COALESCE(p.stock, 0) < t.qty
-  `) as { sku: string; name: string; available: number; required: number }[];
+      json_extract(t.value, '$.sku')      AS sku,
+      COALESCE(p.name, '')                AS name,
+      COALESCE(p.stock, 0)                AS available,
+      json_extract(t.value, '$.quantity') AS required
+    FROM ${jsonRows(lines)} AS t
+    LEFT JOIN products p ON p.sku = json_extract(t.value, '$.sku')
+    WHERE p.sku IS NULL
+       OR COALESCE(p.stock, 0) < json_extract(t.value, '$.quantity')
+  `) as unknown as {
+    sku: string;
+    name: string;
+    available: number;
+    required: number;
+  }[];
 
   return rows.map((row) => ({
     sku: row.sku,
@@ -664,11 +659,8 @@ export async function createOrder(
   input: OrderInput,
   ipHash = "",
 ): Promise<Order> {
-  const sql = getSql();
   const lines = toStockLines(input.items);
 
-  // Lazily built: `sql.transaction()` needs unexecuted query objects, and a
-  // retry after a migration must not reuse an already-sent one.
   const insert = () => sql`
     INSERT INTO orders (
       status, type, first_name, last_name, phone, email, contact_channel,
@@ -686,7 +678,7 @@ export async function createOrder(
       ${input.warehouse},
       ${input.paymentMethod},
       ${input.comment},
-      ${JSON.stringify(input.items)}::jsonb,
+      ${JSON.stringify(input.items)},
       ${input.total},
       ${lines.length > 0},
       ${ipHash}
@@ -697,13 +689,15 @@ export async function createOrder(
   const run = async (): Promise<OrderRow[]> => {
     if (lines.length === 0) {
       // Nothing maps to a catalog row, so there is no stock to move.
-      return (await insert()) as OrderRow[];
+      return (await insert()) as unknown as OrderRow[];
     }
+    // Both statements or neither: if the deduction trips the non-negative
+    // CHECK, the insert rolls back with it and no order is recorded.
     const [, inserted] = await sql.transaction([
-      stockMove(sql, lines, -1),
+      stockMove(lines, -1),
       insert(),
     ]);
-    return inserted as OrderRow[];
+    return inserted as unknown as OrderRow[];
   };
 
   let rows: OrderRow[];
@@ -734,15 +728,14 @@ export async function countRecentOrdersByIp(
   ipHash: string,
   withinMinutes: number,
 ): Promise<number> {
-  const sql = getSql();
   const run = async () =>
     (await sql`
-      SELECT count(*)::int AS n
+      SELECT count(*) AS n
       FROM orders
       WHERE ip_hash = ${ipHash}
         AND ip_hash <> ''
-        AND created_at > now() - make_interval(mins => ${withinMinutes})
-    `) as { n: number }[];
+        AND created_at > ${ago(`-${Math.max(0, Math.floor(withinMinutes))} minutes`)}
+    `) as unknown as { n: number }[];
 
   try {
     return (await run())[0]?.n ?? 0;
@@ -757,20 +750,22 @@ export async function countRecentOrdersByIp(
  * One statement that adds `sign × quantity` to each product's stock.
  * `sign` is -1 to reserve stock for an order and +1 to release it.
  */
-function stockMove(
-  sql: ReturnType<typeof getSql>,
-  lines: StockLine[],
-  sign: -1 | 1,
-) {
+function stockMove(lines: StockLine[], sign: -1 | 1): SqlQuery {
+  const deltas = lines.map((line) => ({
+    sku: line.sku,
+    delta: line.quantity * sign,
+  }));
   return sql`
-    UPDATE products p
-    SET stock      = COALESCE(p.stock, 0) + t.delta,
-        updated_at = now()
-    FROM UNNEST(
-      ${lines.map((line) => line.sku)}::text[],
-      ${lines.map((line) => line.quantity * sign)}::numeric[]
-    ) AS t(sku, delta)
-    WHERE p.sku = t.sku
+    UPDATE products
+    SET stock      = COALESCE(stock, 0) + (
+          SELECT json_extract(t.value, '$.delta')
+          FROM ${jsonRows(deltas)} AS t
+          WHERE json_extract(t.value, '$.sku') = products.sku
+        ),
+        updated_at = ${now()}
+    WHERE sku IN (
+      SELECT json_extract(t.value, '$.sku') FROM ${jsonRows(deltas)} AS t
+    )
   `;
 }
 
@@ -802,84 +797,83 @@ export async function setOrderStatus(
   id: number,
   status: OrderStatus,
 ): Promise<OrderStatusUpdate> {
-  const sql = getSql();
-
-  const readCurrent = async () =>
-    (await sql`
-      SELECT items, COALESCE(stock_applied, false) AS stock_applied
-      FROM orders
-      WHERE id = ${id}
-    `) as { items: unknown; stock_applied: boolean }[];
-
-  let current: { items: unknown; stock_applied: boolean }[];
-  try {
-    current = await readCurrent();
-  } catch (caught) {
-    if (!isMissingSchemaError(caught)) throw caught;
-    await ensureOrdersTable();
-    current = await readCurrent();
-  }
-
-  const row = current[0];
-  if (!row) {
-    throw new OrderNotFoundError(id);
-  }
-
   const shouldHold = reservesStock(status);
-  const holdsNow = row.stock_applied === true;
-  const items = Array.isArray(row.items) ? (row.items as OrderItem[]) : [];
-  const lines = toStockLines(items);
-  const effect: StockEffect =
-    shouldHold === holdsNow || lines.length === 0
-      ? "unchanged"
-      : shouldHold
-        ? "reserved"
-        : "released";
-
-  const setStatus = () => sql`
-    UPDATE orders SET status = ${status} WHERE id = ${id} RETURNING *
-  `;
 
   /**
-   * Claim the reservation flag and move stock in the same statement.
+   * Read the order, then claim the flag and move stock — all in one
+   * transaction.
    *
-   * The `WHERE … stock_applied = ${holdsNow}` is an optimistic lock: whoever
-   * flips the flag first gets rows out of `claimed`, and the product update is
-   * gated on that, so a second concurrent (or repeated) cancellation restocks
-   * nothing. Being one statement, it is atomic on its own.
+   * The Postgres version did this with a data-modifying CTE, which SQLite has
+   * no equivalent for. An interactive transaction expresses the same thing:
+   * `UPDATE … WHERE stock_applied = <what we read>` is the optimistic lock, so
+   * a second concurrent (or repeated) cancellation updates no row, and the
+   * stock move is skipped along with it. Nothing outside the transaction can
+   * observe a half-applied change.
    */
-  const claimAndMove = () => sql`
-    WITH claimed AS (
-      UPDATE orders
-      SET stock_applied = ${shouldHold}
-      WHERE id = ${id} AND COALESCE(stock_applied, false) = ${holdsNow}
-      RETURNING id
-    ),
-    moved AS (
-      UPDATE products p
-      SET stock      = COALESCE(p.stock, 0) + t.delta,
-          updated_at = now()
-      FROM UNNEST(
-        ${lines.map((line) => line.sku)}::text[],
-        ${lines.map((line) => line.quantity * (shouldHold ? -1 : 1))}::numeric[]
-      ) AS t(sku, delta)
-      WHERE p.sku = t.sku AND EXISTS (SELECT 1 FROM claimed)
-      RETURNING p.sku
-    )
-    SELECT (SELECT count(*) FROM claimed)::int AS claimed,
-           (SELECT count(*) FROM moved)::int   AS moved
-  `;
+  const run = async (): Promise<{ rows: OrderRow[]; applied: StockEffect }> =>
+    sql.begin(async (tx) => {
+      const current = (await tx`
+        SELECT items, COALESCE(stock_applied, 0) AS stock_applied
+        FROM orders
+        WHERE id = ${id}
+      `) as unknown as { items: unknown; stock_applied: number }[];
 
-  const run = async (): Promise<{ rows: OrderRow[]; applied: StockEffect }> => {
-    if (effect === "unchanged") {
-      return { rows: (await setStatus()) as OrderRow[], applied: "unchanged" };
-    }
-    const [claim, updated] = await sql.transaction([claimAndMove(), setStatus()]);
-    // Losing the claim means another request already made this move — the
-    // status still applies, but reporting a stock change would be a lie.
-    const claimed = Number(claim[0]?.claimed ?? 0) > 0;
-    return { rows: updated as OrderRow[], applied: claimed ? effect : "unchanged" };
-  };
+      const row = current[0];
+      if (!row) {
+        throw new OrderNotFoundError(id);
+      }
+
+      const holdsNow = toBool(row.stock_applied);
+      const parsed = fromJson<unknown>(row.items, []);
+      const items = Array.isArray(parsed) ? (parsed as OrderItem[]) : [];
+      const lines = toStockLines(items);
+      const effect: StockEffect =
+        shouldHold === holdsNow || lines.length === 0
+          ? "unchanged"
+          : shouldHold
+            ? "reserved"
+            : "released";
+
+      let applied: StockEffect = "unchanged";
+
+      if (effect !== "unchanged") {
+        const claimed = (await tx`
+          UPDATE orders
+          SET stock_applied = ${shouldHold}
+          WHERE id = ${id} AND COALESCE(stock_applied, 0) = ${holdsNow}
+          RETURNING id
+        `) as unknown as { id: number }[];
+
+        // Losing the claim means another request already made this move — the
+        // status still applies, but reporting a stock change would be a lie.
+        if (claimed.length > 0) {
+          const deltas = lines.map((line) => ({
+            sku: line.sku,
+            delta: line.quantity * (shouldHold ? -1 : 1),
+          }));
+          await tx`
+            UPDATE products
+            SET stock      = COALESCE(stock, 0) + (
+                  SELECT json_extract(t.value, '$.delta')
+                  FROM json_each(${JSON.stringify(deltas)}) AS t
+                  WHERE json_extract(t.value, '$.sku') = products.sku
+                ),
+                updated_at = ${now()}
+            WHERE sku IN (
+              SELECT json_extract(t.value, '$.sku')
+              FROM json_each(${JSON.stringify(deltas)}) AS t
+            )
+          `;
+          applied = effect;
+        }
+      }
+
+      const updated = (await tx`
+        UPDATE orders SET status = ${status} WHERE id = ${id} RETURNING *
+      `) as unknown as OrderRow[];
+
+      return { rows: updated, applied };
+    });
 
   let result: { rows: OrderRow[]; applied: StockEffect };
   try {
@@ -887,9 +881,13 @@ export async function setOrderStatus(
   } catch (caught) {
     if (isStockConstraintError(caught)) {
       // Nothing was written: the status change rolled back with the deduction.
+      const items = await readOrderItems(id);
       throw new InsufficientStockError(await findStockShortages(items));
     }
-    throw caught;
+    if (caught instanceof OrderNotFoundError) throw caught;
+    if (!isMissingSchemaError(caught)) throw caught;
+    await ensureOrdersTable();
+    result = await run();
   }
 
   if (!result.rows[0]) {
@@ -898,14 +896,31 @@ export async function setOrderStatus(
   return { order: rowToOrder(result.rows[0]), stock: result.applied };
 }
 
+/**
+ * An order's basket, read on its own.
+ *
+ * Only used to explain an oversell after the transaction that would have
+ * reported it has already rolled back.
+ */
+async function readOrderItems(id: number): Promise<OrderItem[]> {
+  try {
+    const rows = (await sql`
+      SELECT items FROM orders WHERE id = ${id}
+    `) as unknown as { items: unknown }[];
+    const parsed = fromJson<unknown>(rows[0]?.items, []);
+    return Array.isArray(parsed) ? (parsed as OrderItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Most recent orders first. */
 export async function listOrders(limit = 50): Promise<Order[]> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
   const run = async () =>
     (await sql`
       SELECT * FROM orders ORDER BY created_at DESC LIMIT ${safeLimit}
-    `) as OrderRow[];
+    `) as unknown as OrderRow[];
 
   try {
     return (await run()).map(rowToOrder);
@@ -929,7 +944,7 @@ function escapeLike(value: string): string {
 }
 
 /**
- * Paged admin catalog search, executed in Postgres.
+ * Paged admin catalog search, executed in the database.
  *
  * The admin list previously filtered the whole catalog in the browser, which
  * meant shipping every row to the client and re-scanning it on each keystroke.
@@ -951,7 +966,6 @@ export async function searchProductsForAdmin({
   /** Sidebar filters. Combine with the query rather than replacing it. */
   filters?: AdminProductFilters;
 }): Promise<AdminSearchResult> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 100);
   const safeOffset = Math.max(0, Math.floor(offset));
   const trimmed = query.trim();
@@ -960,52 +974,62 @@ export async function searchProductsForAdmin({
   const run = async (): Promise<AdminSearchResult> => {
     if (!trimmed && !filtered) {
       // Nothing selected: the cheap path, most recently touched first. Keeps
-      // the common case off the derived-column joins entirely.
+      // the common case off the derived-column subqueries entirely.
       const rows = (await sql`
         SELECT * FROM products
         ORDER BY updated_at DESC NULLS LAST, name
         LIMIT ${safeLimit} OFFSET ${safeOffset}
-      `) as ProductRow[];
+      `) as unknown as ProductRow[];
       const countRows = (await sql`
-        SELECT COUNT(*)::int AS total FROM products
-      `) as { total: number }[];
+        SELECT COUNT(*) AS total FROM products
+      `) as unknown as { total: number }[];
       return {
         products: rows.filter((r) => r.sku).map(rowToProduct),
         total: countRows[0]?.total ?? 0,
       };
     }
 
-    const pattern = trimmed ? `%${escapeLike(trimmed)}%` : null;
-    // Digits-only variant so a scanned barcode with spaces/dashes still matches.
-    const digits = trimmed.replace(/[^0-9]/g, "");
+    /*
+     * Postgres matched with `ILIKE`, which folds case for any alphabet.
+     * SQLite's `LIKE` folds ASCII only, so a Cyrillic query would match
+     * nothing — the search compares the folded query against the stored
+     * `name_lower` instead, and folds the other columns with `lower()` since
+     * SKUs, brands and barcodes are ASCII.
+     */
+    const foldedPattern = trimmed ? `%${escapeLike(foldCase(trimmed))}%` : null;
+    // Digits-only variant so a scanned barcode with spaces/dashes still
+    // matches; `barcode_digits` is the stored counterpart, maintained on write
+    // because SQLite has no `regexp_replace`.
+    const digits = digitsOf(trimmed);
     const digitPattern = digits ? `%${digits}%` : null;
 
     // A factory, not a shared value: each query gets its own fragment so the
     // two statements never share one lazy query object.
     const whereClause = () => sql`
       (
-        ${pattern}::text IS NULL
-        OR p.name ILIKE ${pattern}
-        OR p.sku ILIKE ${pattern}
-        OR p.brand ILIKE ${pattern}
-        OR p.barcode ILIKE ${pattern}
-        OR (${digitPattern}::text IS NOT NULL
-            AND regexp_replace(COALESCE(p.barcode, ''), '[^0-9]', '', 'g') ILIKE ${digitPattern})
+        ${foldedPattern} IS NULL
+        OR p.name_lower LIKE ${foldedPattern} ESCAPE '\\'
+        OR lower(p.sku) LIKE ${foldedPattern} ESCAPE '\\'
+        OR lower(COALESCE(p.brand, '')) LIKE ${foldedPattern} ESCAPE '\\'
+        OR lower(COALESCE(p.barcode, '')) LIKE ${foldedPattern} ESCAPE '\\'
+        OR (${digitPattern} IS NOT NULL
+            AND p.barcode_digits <> ''
+            AND p.barcode_digits LIKE ${digitPattern})
       )
-      AND ${filterClause(sql, filters)}
+      AND ${filterClause(filters)}
     `;
 
     const rows = (await sql`
-      SELECT * FROM ${derivedProducts(sql)}
+      SELECT * FROM ${derivedProducts()}
       WHERE ${whereClause()}
       ORDER BY p.updated_at DESC NULLS LAST, p.name
       LIMIT ${safeLimit} OFFSET ${safeOffset}
-    `) as ProductRow[];
+    `) as unknown as ProductRow[];
     const countRows = (await sql`
-      SELECT COUNT(*)::int AS total
-      FROM ${derivedProducts(sql)}
+      SELECT COUNT(*) AS total
+      FROM ${derivedProducts()}
       WHERE ${whereClause()}
-    `) as { total: number }[];
+    `) as unknown as { total: number }[];
 
     return {
       products: rows.filter((r) => r.sku).map(rowToProduct),
@@ -1034,7 +1058,7 @@ export interface ImportItem {
   barcode?: string | null;
 }
 
-/** Postgres rejects two updates of the same key in one statement — dedupe first. */
+/** SQLite rejects two updates of the same key in one statement — dedupe first. */
 function dedupeBySku(items: ImportItem[]): ImportItem[] {
   const map = new Map<string, ImportItem>();
   for (const item of items) {
@@ -1047,8 +1071,13 @@ const CHUNK_SIZE = 500;
 
 /**
  * Upsert products by `sku`. Inserts new rows, updates existing ones, and always
- * refreshes `updated_at`. Uses one statement per chunk (via UNNEST) rather than
- * one round trip per item — important over Neon's HTTP driver.
+ * refreshes `updated_at`. Uses one statement per chunk (the whole chunk travels
+ * as a single JSON parameter) rather than one round trip per item — important
+ * over a network-attached database.
+ *
+ * Only the columns УкрСклад owns are written. The admin-owned ones — brand,
+ * category, image_url, images, attributes, description and the two badges —
+ * are left untouched, so they survive every synchronization.
  *
  * @returns how many rows were inserted or updated
  */
@@ -1058,42 +1087,55 @@ export async function upsertProducts(items: ImportItem[]): Promise<number> {
     return 0;
   }
 
-  const sql = getSql();
   let affected = 0;
 
   for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + CHUNK_SIZE);
-
-    const skus = chunk.map((item) => item.sku);
-    const names = chunk.map((item) => item.name);
-    const prices = chunk.map((item) => item.price);
-    // Clamped for `products_stock_non_negative`: УкрСклад can report a negative
-    // on-hand balance, and one such row must not abort the whole chunk.
-    const stocks = chunk.map((item) => Math.max(0, item.stock));
-    // Empty string -> NULL so "no barcode" is stored as NULL, not "".
-    const barcodes = chunk.map((item) => {
-      const value = (item.barcode ?? "").trim();
-      return value === "" ? null : value;
+    const chunk = unique.slice(i, i + CHUNK_SIZE).map((item) => {
+      // Empty string -> NULL so "no barcode" is stored as NULL, not "".
+      const barcode = (item.barcode ?? "").trim() || null;
+      return {
+        sku: item.sku,
+        name: item.name,
+        name_lower: foldCase(item.name),
+        price: item.price,
+        // Clamped for `products_stock_non_negative`: УкрСклад can report a
+        // negative on-hand balance, and one such row must not abort the chunk.
+        stock: Math.max(0, item.stock),
+        barcode,
+        barcode_digits: digitsOf(barcode),
+      };
     });
 
     await sql`
-      INSERT INTO products (sku, name, price, stock, barcode, updated_at)
-      SELECT s, n, p, st, bc, now()
-      FROM UNNEST(
-        ${skus}::text[],
-        ${names}::text[],
-        ${prices}::numeric[],
-        ${stocks}::numeric[],
-        ${barcodes}::text[]
-      ) AS t(s, n, p, st, bc)
+      INSERT INTO products (
+        sku, name, name_lower, price, stock, barcode, barcode_digits, updated_at
+      )
+      SELECT
+        json_extract(t.value, '$.sku'),
+        json_extract(t.value, '$.name'),
+        json_extract(t.value, '$.name_lower'),
+        json_extract(t.value, '$.price'),
+        json_extract(t.value, '$.stock'),
+        json_extract(t.value, '$.barcode'),
+        json_extract(t.value, '$.barcode_digits'),
+        ${now()}
+      FROM ${jsonRows(chunk)} AS t
+      -- SQLite cannot tell this ON CONFLICT from a join's ON clause unless the
+      -- SELECT carries a WHERE, so the no-op one below is load-bearing.
+      WHERE true
       ON CONFLICT (sku) DO UPDATE SET
-        name       = EXCLUDED.name,
-        price      = EXCLUDED.price,
-        stock      = EXCLUDED.stock,
+        name           = excluded.name,
+        name_lower     = excluded.name_lower,
+        price          = excluded.price,
+        stock          = excluded.stock,
         -- Keep a previously stored barcode when this import omits one,
         -- so a feed without barcodes does not wipe existing values.
-        barcode    = COALESCE(EXCLUDED.barcode, products.barcode),
-        updated_at = now()
+        barcode        = COALESCE(excluded.barcode, products.barcode),
+        barcode_digits = CASE
+                           WHEN excluded.barcode IS NULL THEN products.barcode_digits
+                           ELSE excluded.barcode_digits
+                         END,
+        updated_at     = excluded.updated_at
     `;
 
     affected += chunk.length;
@@ -1117,29 +1159,35 @@ export async function findCoPurchasedSkus(
     return [];
   }
 
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 20);
-  // Containment match on the JSONB basket: `items @> '[{"sku": "..."}]'`.
-  const probe = JSON.stringify([{ sku }]);
 
   try {
+    /*
+     * Postgres matched baskets with the JSONB containment operator
+     * (`items @> '[{"sku": …}]'`) and unpacked them with
+     * `LATERAL jsonb_array_elements`. SQLite has neither, so both halves are
+     * `json_each`: an EXISTS subquery to find the baskets, and a join to read
+     * every line out of them.
+     */
     const rows = (await sql`
       WITH baskets AS (
         SELECT id, items
         FROM orders
-        WHERE status <> 'CANCELLED' AND items @> ${probe}::jsonb
-      ),
-      lines AS (
-        SELECT b.id, item->>'sku' AS sku
-        FROM baskets b, LATERAL jsonb_array_elements(b.items) AS item
+        WHERE status <> 'CANCELLED'
+          AND EXISTS (
+            SELECT 1 FROM json_each(orders.items) AS probe
+            WHERE json_extract(probe.value, '$.sku') = ${sku}
+          )
       )
-      SELECT sku, COUNT(DISTINCT id)::int AS orders
-      FROM lines
-      WHERE COALESCE(sku, '') <> '' AND sku <> ${sku}
+      SELECT json_extract(item.value, '$.sku') AS sku,
+             COUNT(DISTINCT b.id)              AS orders
+      FROM baskets b, json_each(b.items) AS item
+      WHERE COALESCE(json_extract(item.value, '$.sku'), '') <> ''
+        AND json_extract(item.value, '$.sku') <> ${sku}
       GROUP BY sku
       ORDER BY orders DESC, sku
       LIMIT ${safeLimit}
-    `) as { sku: string; orders: number }[];
+    `) as unknown as { sku: string; orders: number }[];
 
     return rows.map((row) => row.sku);
   } catch (caught) {
@@ -1164,12 +1212,11 @@ export async function findCoPurchasedSkus(
  * (`normalizeStoreSettings` falls back to the default per key).
  */
 export async function ensureSettingsTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS store_settings (
       key        text PRIMARY KEY,
       value      text NOT NULL,
-      updated_at timestamptz NOT NULL DEFAULT now()
+      updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
   `;
 }
@@ -1180,9 +1227,8 @@ async function readStoreSettings(): Promise<StoreSettings> {
     return DEFAULT_STORE_SETTINGS;
   }
 
-  const sql = getSql();
   const run = async () =>
-    (await sql`SELECT key, value FROM store_settings`) as {
+    (await sql`SELECT key, value FROM store_settings`) as unknown as {
       key: string;
       value: string;
     }[];
@@ -1226,18 +1272,22 @@ export const getStoreSettings = unstable_cache(
 
 /** Write every field in one statement. */
 export async function saveStoreSettings(values: StoreSettings): Promise<void> {
-  const sql = getSql();
-  const keys = Object.keys(values);
-  const entries = keys.map((key) => values[key as keyof StoreSettings]);
+  const pairs = Object.keys(values).map((key) => ({
+    key,
+    value: values[key as keyof StoreSettings],
+  }));
 
   const run = async () => {
     await sql`
       INSERT INTO store_settings (key, value, updated_at)
-      SELECT k, v, now()
-      FROM UNNEST(${keys}::text[], ${entries}::text[]) AS t(k, v)
+      SELECT json_extract(t.value, '$.key'),
+             json_extract(t.value, '$.value'),
+             ${now()}
+      FROM ${jsonRows(pairs)} AS t
+      WHERE true
       ON CONFLICT (key) DO UPDATE SET
-        value      = EXCLUDED.value,
-        updated_at = now()
+        value      = excluded.value,
+        updated_at = excluded.updated_at
     `;
   };
 
@@ -1254,17 +1304,16 @@ export async function saveStoreSettings(values: StoreSettings): Promise<void> {
 
 /** Create the `reviews` table if it does not exist. Idempotent. */
 export async function ensureReviewsTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS reviews (
-      id          serial PRIMARY KEY,
+      id          integer PRIMARY KEY AUTOINCREMENT,
       product_sku text NOT NULL,
       author_name text NOT NULL,
-      rating      smallint NOT NULL,
+      rating      integer NOT NULL,
       body        text NOT NULL,
       status      text NOT NULL DEFAULT 'PENDING',
       ip_hash     text NOT NULL DEFAULT '',
-      created_at  timestamptz NOT NULL DEFAULT now(),
+      created_at  text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       CONSTRAINT reviews_rating_range CHECK (rating BETWEEN 1 AND 5)
     )
   `;
@@ -1335,14 +1384,13 @@ export async function countRecentReviewsByIp(
   ipHash: string,
   withinHours: number,
 ): Promise<number> {
-  const sql = getSql();
   const rows = (await sql`
-    SELECT count(*)::int AS n
+    SELECT count(*) AS n
     FROM reviews
     WHERE ip_hash = ${ipHash}
       AND ip_hash <> ''
-      AND created_at > now() - make_interval(hours => ${withinHours})
-  `) as { n: number }[];
+      AND created_at > ${ago(`-${Math.max(0, Math.floor(withinHours))} hours`)}
+  `) as unknown as { n: number }[];
   return rows[0]?.n ?? 0;
 }
 
@@ -1352,14 +1400,13 @@ export async function hasRecentReviewForProduct(
   productSku: string,
   withinHours: number,
 ): Promise<boolean> {
-  const sql = getSql();
   const rows = (await sql`
     SELECT 1
     FROM reviews
     WHERE ip_hash = ${ipHash}
       AND ip_hash <> ''
       AND product_sku = ${productSku}
-      AND created_at > now() - make_interval(hours => ${withinHours})
+      AND created_at > ${ago(`-${Math.max(0, Math.floor(withinHours))} hours`)}
     LIMIT 1
   `) as unknown[];
   return rows.length > 0;
@@ -1367,7 +1414,6 @@ export async function hasRecentReviewForProduct(
 
 /** Store a new review. Always lands in `PENDING`. */
 export async function createReview(input: ReviewInput): Promise<Review> {
-  const sql = getSql();
   const run = async () =>
     (await sql`
       INSERT INTO reviews (product_sku, author_name, rating, body, status, ip_hash)
@@ -1380,7 +1426,7 @@ export async function createReview(input: ReviewInput): Promise<Review> {
         ${input.ipHash}
       )
       RETURNING *
-    `) as ReviewRow[];
+    `) as unknown as ReviewRow[];
 
   try {
     return rowToReview((await run())[0]);
@@ -1396,7 +1442,6 @@ export async function listApprovedReviews(
   productSku: string,
   limit = 50,
 ): Promise<Review[]> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
   try {
     const rows = (await sql`
@@ -1404,7 +1449,7 @@ export async function listApprovedReviews(
       WHERE product_sku = ${productSku} AND status = 'APPROVED'
       ORDER BY created_at DESC
       LIMIT ${safeLimit}
-    `) as ReviewRow[];
+    `) as unknown as ReviewRow[];
     return rows.map(rowToReview);
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1418,7 +1463,6 @@ export async function listApprovedReviews(
  * being reviewed without looking the SKU up.
  */
 export async function listReviews(limit = 200): Promise<Review[]> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 500);
   try {
     const rows = (await sql`
@@ -1427,7 +1471,7 @@ export async function listReviews(limit = 200): Promise<Review[]> {
       LEFT JOIN products p ON p.sku = r.product_sku
       ORDER BY r.created_at DESC
       LIMIT ${safeLimit}
-    `) as ReviewRow[];
+    `) as unknown as ReviewRow[];
     return rows.map(rowToReview);
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1447,10 +1491,9 @@ export async function setReviewStatus(
   id: number,
   status: ReviewStatus,
 ): Promise<Review> {
-  const sql = getSql();
   const rows = (await sql`
     UPDATE reviews SET status = ${status} WHERE id = ${id} RETURNING *
-  `) as ReviewRow[];
+  `) as unknown as ReviewRow[];
   if (rows.length === 0) {
     throw new ReviewNotFoundError(id);
   }
@@ -1458,7 +1501,6 @@ export async function setReviewStatus(
 }
 
 export async function deleteReview(id: number): Promise<void> {
-  const sql = getSql();
   await sql`DELETE FROM reviews WHERE id = ${id}`;
 }
 
@@ -1471,13 +1513,12 @@ export async function deleteReview(id: number): Promise<void> {
 export async function loadReviewStats(): Promise<Map<string, ReviewStats>> {
   const stats = new Map<string, ReviewStats>();
   try {
-    const sql = getSql();
     const rows = (await sql`
-      SELECT product_sku, avg(rating)::float8 AS average, count(*)::int AS count
+      SELECT product_sku, avg(rating) AS average, count(*) AS count
       FROM reviews
       WHERE status = 'APPROVED'
       GROUP BY product_sku
-    `) as { product_sku: string; average: number; count: number }[];
+    `) as unknown as { product_sku: string; average: number; count: number }[];
 
     for (const row of rows) {
       stats.set(row.product_sku, {
@@ -1499,47 +1540,41 @@ export async function loadReviewStats(): Promise<Map<string, ReviewStats>> {
 
 /* ------------------------------ customers -------------------------------- */
 
-/** Create the `customers` and `favorites` tables if absent. Idempotent. */
+/**
+ * Create the `customers`, `favorites` and `password_resets` tables if absent.
+ * Idempotent. Mirrors `lib/schema.ts` — see the note on `ensureProductsTable`.
+ */
 export async function ensureCustomersTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS customers (
-      id            serial PRIMARY KEY,
+      id            integer PRIMARY KEY AUTOINCREMENT,
       email         text NOT NULL,
       password_hash text NOT NULL,
       name          text NOT NULL DEFAULT '',
       phone         text NOT NULL DEFAULT '',
-      created_at    timestamptz NOT NULL DEFAULT now()
+      -- Session generation. The customer's cookie carries the number it was
+      -- signed with; bumping it invalidates every session that customer has
+      -- anywhere, which is the whole point of changing a password after a
+      -- break-in. Starts at 1 rather than 0 so an absent/legacy value in a
+      -- token is distinguishable.
+      session_epoch integer NOT NULL DEFAULT 1,
+      created_at    text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
   `;
   // Email is the login, so uniqueness is enforced by the database rather than
-  // by a read-then-write in the action, which two concurrent signups could race.
+  // by a read-then-write in the action, which two concurrent signups could
+  // race. Addresses are ASCII, so SQLite's ASCII-only `lower()` suffices.
   await sql`
-    CREATE UNIQUE INDEX IF NOT EXISTS customers_email_key ON customers (lower(email))
-  `;
-  // Session generation. The customer's cookie carries the number it was signed
-  // with; bumping it here invalidates every session that customer has anywhere,
-  // which is the whole point of changing a password after a break-in. Starts at
-  // 1 rather than 0 so an absent/legacy value in a token is distinguishable.
-  await sql`
-    ALTER TABLE customers
-    ADD COLUMN IF NOT EXISTS session_epoch integer NOT NULL DEFAULT 1
+    CREATE UNIQUE INDEX IF NOT EXISTS customers_email_key
+    ON customers (lower(email))
   `;
   await sql`
     CREATE TABLE IF NOT EXISTS favorites (
       customer_id integer NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
       product_sku text NOT NULL,
-      created_at  timestamptz NOT NULL DEFAULT now(),
+      created_at  text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY (customer_id, product_sku)
     )
-  `;
-  // Orders placed while signed in are owned outright; older ones are matched
-  // by phone/email at read time (see `listOrdersForCustomer`).
-  await sql`
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id integer
-  `;
-  await sql`
-    CREATE INDEX IF NOT EXISTS orders_customer_idx ON orders (customer_id)
   `;
   // Password reset tickets. `token_hash` is a SHA-256 of the value that went
   // out by email and is the primary key: the raw token exists only in that one
@@ -1549,9 +1584,9 @@ export async function ensureCustomersTable(): Promise<void> {
     CREATE TABLE IF NOT EXISTS password_resets (
       token_hash  text PRIMARY KEY,
       customer_id integer NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-      expires_at  timestamptz NOT NULL,
-      used_at     timestamptz,
-      created_at  timestamptz NOT NULL DEFAULT now()
+      expires_at  text NOT NULL,
+      used_at     text,
+      created_at  text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
   `;
   // Every lookup is by token; this index is for the sweep of dead rows.
@@ -1613,10 +1648,7 @@ export class EmailTakenError extends Error {
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  const detail = error as { code?: string } | null;
-  if (detail?.code === "23505") return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /duplicate key|customers_email_key|unique constraint/i.test(message);
+  return isLibsqlUniqueViolation(error);
 }
 
 export async function createCustomer(input: {
@@ -1625,13 +1657,12 @@ export async function createCustomer(input: {
   name: string;
   phone: string;
 }): Promise<CustomerWithSecret> {
-  const sql = getSql();
   const run = async () =>
     (await sql`
       INSERT INTO customers (email, password_hash, name, phone)
       VALUES (${input.email}, ${input.passwordHash}, ${input.name}, ${input.phone})
       RETURNING *
-    `) as CustomerRow[];
+    `) as unknown as CustomerRow[];
 
   try {
     return rowToCustomer((await run())[0]);
@@ -1651,11 +1682,10 @@ export async function createCustomer(input: {
 export async function findCustomerByEmail(
   email: string,
 ): Promise<CustomerWithSecret | null> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT * FROM customers WHERE lower(email) = lower(${email}) LIMIT 1
-    `) as CustomerRow[];
+    `) as unknown as CustomerRow[];
     return rows.length > 0 ? rowToCustomer(rows[0]) : null;
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1665,11 +1695,10 @@ export async function findCustomerByEmail(
 }
 
 export async function findCustomerById(id: number): Promise<Customer | null> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT * FROM customers WHERE id = ${id} LIMIT 1
-    `) as CustomerRow[];
+    `) as unknown as CustomerRow[];
     if (rows.length === 0) return null;
     const full = rowToCustomer(rows[0]);
     // The hash never leaves this module for a read-only lookup.
@@ -1698,11 +1727,10 @@ export async function findCustomerById(id: number): Promise<Customer | null> {
 export async function findCustomerSecretById(
   id: number,
 ): Promise<CustomerWithSecret | null> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT * FROM customers WHERE id = ${id} LIMIT 1
-    `) as CustomerRow[];
+    `) as unknown as CustomerRow[];
     return rows.length > 0 ? rowToCustomer(rows[0]) : null;
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1717,7 +1745,6 @@ export async function updateCustomerContact(
   name: string,
   phone: string,
 ): Promise<void> {
-  const sql = getSql();
   try {
     await sql`
       UPDATE customers
@@ -1742,7 +1769,6 @@ export async function updateCustomerContact(
 export async function getCustomerSessionEpoch(
   id: number,
 ): Promise<number | null> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT session_epoch FROM customers WHERE id = ${id} LIMIT 1
@@ -1771,7 +1797,6 @@ export async function changeCustomerPassword(
   id: number,
   passwordHash: string,
 ): Promise<number | null> {
-  const sql = getSql();
   const rows = (await sql`
     UPDATE customers
     SET password_hash = ${passwordHash},
@@ -1804,9 +1829,8 @@ export async function createPasswordReset(
   tokenHash: string,
   expiresAt: Date,
 ): Promise<void> {
-  const sql = getSql();
   await sql`DELETE FROM password_resets WHERE customer_id = ${customerId}`;
-  await sql`DELETE FROM password_resets WHERE expires_at < now()`;
+  await sql`DELETE FROM password_resets WHERE expires_at < ${now()}`;
   await sql`
     INSERT INTO password_resets (token_hash, customer_id, expires_at)
     VALUES (${tokenHash}, ${customerId}, ${expiresAt.toISOString()})
@@ -1823,16 +1847,15 @@ export async function createPasswordReset(
 export async function findPasswordReset(
   tokenHash: string,
 ): Promise<number | null> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT customer_id
       FROM password_resets
       WHERE token_hash = ${tokenHash}
         AND used_at IS NULL
-        AND expires_at > now()
+        AND expires_at > ${now()}
       LIMIT 1
-    `) as { customer_id: number }[];
+    `) as unknown as { customer_id: number }[];
     return rows[0]?.customer_id ?? null;
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1862,52 +1885,63 @@ export async function consumePasswordReset(
   tokenHash: string,
   passwordHash: string,
 ): Promise<ConsumedReset | null> {
-  const sql = getSql();
-  // One statement, not two: the data-modifying CTE claims the ticket and the
-  // outer UPDATE only ever runs for a ticket that was actually claimed. Two
-  // separate statements could not express this — the second would have to
-  // re-find a row the first had just marked used.
-  //
-  // `session_epoch + 1` is part of the same statement for the same reason the
-  // ticket is burned here: a reset is how someone recovers a *stolen* account,
-  // and it would be worth little if the thief's existing cookie kept working.
-  const rows = (await sql`
-    WITH claimed AS (
+  /*
+   * Claim the ticket and change the password in one transaction.
+   *
+   * Postgres did this with a data-modifying CTE so the UPDATE could only ever
+   * run for a ticket that was actually claimed. SQLite has no such CTE, so the
+   * claim and the password change are two statements inside one transaction —
+   * which gives the same guarantee: the `used_at IS NULL` guard means a second
+   * concurrent request claims no row, and the password change is skipped along
+   * with it.
+   *
+   * `session_epoch + 1` belongs here for the same reason the ticket is burned
+   * here: a reset is how someone recovers a *stolen* account, and it would be
+   * worth little if the thief's existing cookie kept working.
+   */
+  return sql.begin(async (tx) => {
+    const claimed = (await tx`
       UPDATE password_resets
-      SET used_at = now()
+      SET used_at = ${now()}
       WHERE token_hash = ${tokenHash}
         AND used_at IS NULL
-        AND expires_at > now()
+        AND expires_at > ${now()}
       RETURNING customer_id
-    )
-    UPDATE customers
-    SET password_hash = ${passwordHash},
-        session_epoch = session_epoch + 1
-    FROM claimed
-    WHERE customers.id = claimed.customer_id
-    RETURNING customers.id, customers.email, customers.session_epoch
-  `) as { id: number; email: string; session_epoch: number }[];
+    `) as unknown as { customer_id: number }[];
 
-  const row = rows[0];
-  return row
-    ? {
-        id: row.id,
-        email: row.email ?? "",
-        sessionEpoch: Number(row.session_epoch) || 1,
-      }
-    : null;
+    const customerId = claimed[0]?.customer_id;
+    if (customerId === undefined || customerId === null) {
+      return null;
+    }
+
+    const rows = (await tx`
+      UPDATE customers
+      SET password_hash = ${passwordHash},
+          session_epoch = session_epoch + 1
+      WHERE id = ${customerId}
+      RETURNING id, email, session_epoch
+    `) as unknown as { id: number; email: string; session_epoch: number }[];
+
+    const row = rows[0];
+    return row
+      ? {
+          id: row.id,
+          email: row.email ?? "",
+          sessionEpoch: Number(row.session_epoch) || 1,
+        }
+      : null;
+  });
 }
 
 /* ------------------------------ favorites -------------------------------- */
 
 export async function listFavorites(customerId: number): Promise<string[]> {
-  const sql = getSql();
   try {
     const rows = (await sql`
       SELECT product_sku FROM favorites
       WHERE customer_id = ${customerId}
       ORDER BY created_at DESC
-    `) as { product_sku: string }[];
+    `) as unknown as { product_sku: string }[];
     return rows.map((row) => row.product_sku);
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -1919,7 +1953,6 @@ export async function addFavorite(
   customerId: number,
   productSku: string,
 ): Promise<void> {
-  const sql = getSql();
   const run = async () => {
     await sql`
       INSERT INTO favorites (customer_id, product_sku)
@@ -1940,7 +1973,6 @@ export async function removeFavorite(
   customerId: number,
   productSku: string,
 ): Promise<void> {
-  const sql = getSql();
   try {
     await sql`
       DELETE FROM favorites
@@ -1964,11 +1996,11 @@ export async function mergeFavorites(
   const unique = [...new Set(skus.filter((sku) => sku.trim()))];
   if (unique.length === 0) return;
 
-  const sql = getSql();
   const run = async () => {
     await sql`
       INSERT INTO favorites (customer_id, product_sku)
-      SELECT ${customerId}, sku FROM UNNEST(${unique}::text[]) AS t(sku)
+      SELECT ${customerId}, t.value FROM ${jsonRows(unique)} AS t
+      WHERE true
       ON CONFLICT (customer_id, product_sku) DO NOTHING
     `;
   };
@@ -1997,7 +2029,6 @@ export async function listOrdersForCustomer(
   phone: string,
   limit = 100,
 ): Promise<Order[]> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 200);
   try {
     /*
@@ -2027,7 +2058,7 @@ export async function listOrdersForCustomer(
             )
       ORDER BY created_at DESC
       LIMIT ${safeLimit}
-    `) as OrderRow[];
+    `) as unknown as OrderRow[];
     return rows.map(rowToOrder);
   } catch (caught) {
     if (!isMissingSchemaError(caught)) throw caught;
@@ -2041,7 +2072,6 @@ export async function claimOrderForCustomer(
   orderId: number,
   customerId: number,
 ): Promise<void> {
-  const sql = getSql();
   try {
     await sql`
       UPDATE orders SET customer_id = ${customerId}
@@ -2074,7 +2104,6 @@ export interface GenerationCandidate {
 export async function listProductsMissingDescription(
   limit: number,
 ): Promise<GenerationCandidate[]> {
-  const sql = getSql();
   const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 5000);
   const run = async () =>
     (await sql`
@@ -2087,7 +2116,7 @@ export async function listProductsMissingDescription(
       WHERE description IS NULL
       ORDER BY sku
       LIMIT ${safeLimit}
-    `) as GenerationCandidate[];
+    `) as unknown as GenerationCandidate[];
 
   try {
     return await run();
@@ -2104,15 +2133,14 @@ export async function countGenerationProgress(): Promise<{
   described: number;
   unknown: number;
 }> {
-  const sql = getSql();
   const run = async () =>
     (await sql`
       SELECT
-        count(*) FILTER (WHERE description IS NULL)::int        AS pending,
-        count(*) FILTER (WHERE description <> '')::int          AS described,
-        count(*) FILTER (WHERE description = '')::int           AS unknown
+        count(*) FILTER (WHERE description IS NULL) AS pending,
+        count(*) FILTER (WHERE description <> '')   AS described,
+        count(*) FILTER (WHERE description = '')    AS unknown
       FROM products
-    `) as { pending: number; described: number; unknown: number }[];
+    `) as unknown as { pending: number; described: number; unknown: number }[];
 
   try {
     return (await run())[0];
@@ -2137,15 +2165,17 @@ export async function saveGeneratedContent(
   description: string | null,
   attributes: Record<string, string>,
 ): Promise<void> {
-  const sql = getSql();
   const text = (description ?? "").trim();
   const clean = sanitizeAttributes(attributes);
 
   await sql`
     UPDATE products
     SET description = ${text},
-        attributes  = ${JSON.stringify(clean)}::jsonb || COALESCE(attributes, '{}'::jsonb),
-        updated_at  = now()
+        -- json_patch(generated, existing) is the SQLite spelling of the
+        -- Postgres generated || existing: keys present in both keep the
+        -- existing value, so an admin-entered attribute always wins.
+        attributes  = json_patch(${JSON.stringify(clean)}, COALESCE(attributes, '{}')),
+        updated_at  = ${now()}
     WHERE sku = ${sku}
   `;
 }
@@ -2162,13 +2192,36 @@ export async function saveGeneratedContent(
  * Both expressions are built from the very constants `detectBrand` and
  * `inferCategory` use, passed as parameters — the array order carries the
  * precedence, so the two implementations cannot drift apart.
+ *
+ * Two Postgres features this needed are absent from SQLite, and the
+ * replacements are worth knowing:
+ *
+ *  - `LATERAL … WITH ORDINALITY` becomes a correlated scalar subquery over
+ *    `json_each`, whose `key` column *is* the array index — so ordering by it
+ *    still reproduces `Array.prototype.find()`, where the earliest entry wins.
+ *  - `p.name ~* pattern` has no equivalent: SQLite ships no regex. The
+ *    `CATEGORY_RULES` patterns are plain `a|b|c` alternations of literals, so
+ *    each one is split on `|` and matched with `LIKE '%…%'` against the
+ *    case-folded `name_lower` column, which is exactly what the regex did.
  */
-function derivedProducts(sql: ReturnType<typeof getSql>) {
-  const brands = [...KNOWN_BRANDS];
+function derivedProducts() {
   const countries = [...COUNTRY_VALUES];
-  const slugs = CATEGORY_RULES.map((rule) => rule.slug);
-  const patterns = CATEGORY_RULES.map((rule) => rule.pattern);
   const knownSlugs = [...KNOWN_SLUGS];
+  // Brand matching is case-insensitive in `detectBrand`, and `name_lower` is
+  // already folded, so the needles are folded to match.
+  const brands = [...KNOWN_BRANDS].map((brand) => ({
+    brand,
+    needle: brand.toLowerCase(),
+  }));
+  // One row per (rule, alternative), keeping the rule's position so the first
+  // rule in CATEGORY_RULES still wins however many alternatives it has.
+  const categoryNeedles = CATEGORY_RULES.flatMap((rule, order) =>
+    rule.pattern
+      .split("|")
+      .map((needle) => needle.trim())
+      .filter(Boolean)
+      .map((needle) => ({ slug: rule.slug, needle, ord: order })),
+  );
 
   return sql`(
     SELECT
@@ -2177,36 +2230,30 @@ function derivedProducts(sql: ReturnType<typeof getSql>) {
       -- otherwise the first KNOWN_BRANDS entry appearing in the name.
       CASE
         WHEN COALESCE(p.brand, '') <> ''
-             AND lower(p.brand) <> ALL (${countries}::text[])
+             AND lower(p.brand) NOT IN (SELECT value FROM ${jsonRows(countries)})
         THEN p.brand
-        ELSE COALESCE(eb.brand, '')
+        ELSE COALESCE((
+          SELECT json_extract(b.value, '$.brand')
+          FROM ${jsonRows(brands)} AS b
+          WHERE p.name_lower LIKE '%' || json_extract(b.value, '$.needle') || '%'
+          ORDER BY b.key
+          LIMIT 1
+        ), '')
       END AS eff_brand,
       -- safeCategorySlug(stored || inferCategory()).
       CASE
         WHEN COALESCE(p.category, '') <> '' THEN
-          CASE WHEN p.category = ANY (${knownSlugs}::text[])
+          CASE WHEN p.category IN (SELECT value FROM ${jsonRows(knownSlugs)})
                THEN p.category ELSE ${CATEGORY_FALLBACK} END
-        ELSE COALESCE(ec.slug, ${CATEGORY_FALLBACK})
+        ELSE COALESCE((
+          SELECT json_extract(c.value, '$.slug')
+          FROM ${jsonRows(categoryNeedles)} AS c
+          WHERE p.name_lower LIKE '%' || json_extract(c.value, '$.needle') || '%'
+          ORDER BY json_extract(c.value, '$.ord'), c.key
+          LIMIT 1
+        ), ${CATEGORY_FALLBACK})
       END AS eff_category
     FROM products p
-    -- WITH ORDINALITY + ORDER BY ord reproduces Array.prototype.find():
-    -- the earliest entry in the constant array wins, so "Ланцюг Oregon для
-    -- STIHL" reads as STIHL in the filter exactly as it does on the site.
-    LEFT JOIN LATERAL (
-      SELECT b.brand
-      FROM unnest(${brands}::text[]) WITH ORDINALITY AS b(brand, ord)
-      WHERE p.name ILIKE '%' || b.brand || '%'
-      ORDER BY b.ord
-      LIMIT 1
-    ) eb ON true
-    LEFT JOIN LATERAL (
-      SELECT c.slug
-      FROM unnest(${slugs}::text[], ${patterns}::text[])
-           WITH ORDINALITY AS c(slug, pattern, ord)
-      WHERE p.name ~* c.pattern
-      ORDER BY c.ord
-      LIMIT 1
-    ) ec ON true
   ) p`;
 }
 
@@ -2245,12 +2292,10 @@ export function hasAdminFilters(filters: AdminProductFilters): boolean {
  *
  * Each clause short-circuits on a NULL parameter, so an unset filter costs
  * nothing and there is no string concatenation anywhere — every value is a
- * bound parameter.
+ * bound parameter. The Postgres `= ANY(${array}::text[])` becomes
+ * `IN (SELECT value FROM json_each(?))`, the array travelling as JSON.
  */
-function filterClause(
-  sql: ReturnType<typeof getSql>,
-  filters: AdminProductFilters,
-) {
+function filterClause(filters: AdminProductFilters) {
   const brands = orNull(filters.brands);
   const categories = orNull(filters.categories);
   const badges = orNull(filters.badges);
@@ -2260,26 +2305,37 @@ function filterClause(
       ? filters.availability
       : null;
 
+  // `json_each` needs a JSON document, so an unset filter is passed as NULL
+  // and guarded by the `IS NULL` half of each clause rather than expanded.
+  const brandsJson = brands ? JSON.stringify(brands) : null;
+  const categoriesJson = categories ? JSON.stringify(categories) : null;
+  const badgesJson = badges ? JSON.stringify(badges) : null;
+  const missingJson = missing ? JSON.stringify(missing) : null;
+
   return sql`
-    (${brands}::text[] IS NULL OR p.eff_brand = ANY (${brands}::text[]))
-    AND (${categories}::text[] IS NULL OR p.eff_category = ANY (${categories}::text[]))
+    (${brandsJson} IS NULL
+     OR p.eff_brand IN (SELECT value FROM json_each(${brandsJson})))
+    AND (${categoriesJson} IS NULL
+     OR p.eff_category IN (SELECT value FROM json_each(${categoriesJson})))
     AND (
-      ${availability}::text IS NULL
-      OR (${availability}::text = 'in'  AND COALESCE(p.stock, 0) >  0)
-      OR (${availability}::text = 'out' AND COALESCE(p.stock, 0) <= 0)
+      ${availability} IS NULL
+      OR (${availability} = 'in'  AND COALESCE(p.stock, 0) >  0)
+      OR (${availability} = 'out' AND COALESCE(p.stock, 0) <= 0)
     )
     AND (
-      ${badges}::text[] IS NULL
-      OR ('promo'      = ANY (${badges}::text[]) AND p.is_promo      IS TRUE)
-      OR ('bestseller' = ANY (${badges}::text[]) AND p.is_bestseller IS TRUE)
+      ${badgesJson} IS NULL
+      OR ('promo' IN (SELECT value FROM json_each(${badgesJson}))
+          AND p.is_promo = 1)
+      OR ('bestseller' IN (SELECT value FROM json_each(${badgesJson}))
+          AND p.is_bestseller = 1)
     )
     AND (
-      ${missing}::text[] IS NULL
-      OR ('description' = ANY (${missing}::text[])
+      ${missingJson} IS NULL
+      OR ('description' IN (SELECT value FROM json_each(${missingJson}))
           AND COALESCE(p.description, '') = '')
-      OR ('attributes'  = ANY (${missing}::text[])
-          AND COALESCE(p.attributes, '{}'::jsonb) = '{}'::jsonb)
-      OR ('image'       = ANY (${missing}::text[])
+      OR ('attributes' IN (SELECT value FROM json_each(${missingJson}))
+          AND COALESCE(p.attributes, '{}') IN ('{}', ''))
+      OR ('image' IN (SELECT value FROM json_each(${missingJson}))
           AND COALESCE(p.image_url, '') IN ('', ${LOCAL_PLACEHOLDER}))
     )
   `;
@@ -2305,38 +2361,37 @@ export interface AdminFacets {
  * every keystroke, while these totals only change after an edit or import.
  */
 export async function loadAdminFacets(): Promise<AdminFacets> {
-  const sql = getSql();
 
   const run = async (): Promise<AdminFacets> => {
     const [brandRows, categoryRows, totalRows] = await Promise.all([
       sql`
-        SELECT p.eff_brand AS value, COUNT(*)::int AS count
-        FROM ${derivedProducts(sql)}
+        SELECT p.eff_brand AS value, COUNT(*) AS count
+        FROM ${derivedProducts()}
         WHERE p.eff_brand <> ''
         GROUP BY p.eff_brand
         ORDER BY count DESC, value
       `,
       sql`
-        SELECT p.eff_category AS value, COUNT(*)::int AS count
-        FROM ${derivedProducts(sql)}
+        SELECT p.eff_category AS value, COUNT(*) AS count
+        FROM ${derivedProducts()}
         GROUP BY p.eff_category
         ORDER BY count DESC, value
       `,
       sql`
         SELECT
-          COUNT(*) FILTER (WHERE COALESCE(stock, 0) >  0)::int AS in_stock,
-          COUNT(*) FILTER (WHERE COALESCE(stock, 0) <= 0)::int AS out_stock,
-          COUNT(*) FILTER (WHERE COALESCE(description, '') = '')::int AS no_description,
-          COUNT(*) FILTER (WHERE COALESCE(attributes, '{}'::jsonb) = '{}'::jsonb)::int AS no_attributes,
-          COUNT(*) FILTER (WHERE COALESCE(image_url, '') IN ('', ${LOCAL_PLACEHOLDER}))::int AS no_image
+          COUNT(*) FILTER (WHERE COALESCE(stock, 0) >  0) AS in_stock,
+          COUNT(*) FILTER (WHERE COALESCE(stock, 0) <= 0) AS out_stock,
+          COUNT(*) FILTER (WHERE COALESCE(description, '') = '') AS no_description,
+          COUNT(*) FILTER (WHERE COALESCE(attributes, '{}') IN ('{}', '')) AS no_attributes,
+          COUNT(*) FILTER (WHERE COALESCE(image_url, '') IN ('', ${LOCAL_PLACEHOLDER})) AS no_image
         FROM products
       `,
     ]);
 
-    const brands = brandRows as AdminFacet[];
-    const categories = categoryRows as AdminFacet[];
+    const brands = brandRows as unknown as AdminFacet[];
+    const categories = categoryRows as unknown as AdminFacet[];
     const t = (
-      totalRows as {
+      totalRows as unknown as {
         in_stock: number;
         out_stock: number;
         no_description: number;
@@ -2384,23 +2439,19 @@ export async function loadAdminFacets(): Promise<AdminFacets> {
 export type LoginScope = "admin" | "customer" | "reset";
 
 export async function ensureLoginAttemptsTable(): Promise<void> {
-  const sql = getSql();
   await sql`
     CREATE TABLE IF NOT EXISTS login_attempts (
-      id         serial PRIMARY KEY,
-      scope      text NOT NULL,
-      ip_hash    text NOT NULL,
-      created_at timestamptz NOT NULL DEFAULT now()
+      id           integer PRIMARY KEY AUTOINCREMENT,
+      scope        text NOT NULL,
+      ip_hash      text NOT NULL,
+      -- Which *account* was guessed at, as a salted hash of the email. A
+      -- per-IP budget alone is blind to the attack that actually matters here:
+      -- credential stuffing driven from a botnet, where every request carries
+      -- a fresh address but always targets the same handful of accounts. Empty
+      -- for the admin login, which has one account by definition.
+      account_hash text NOT NULL DEFAULT '',
+      created_at   text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     )
-  `;
-  // Which *account* was guessed at, as a salted hash of the email. A per-IP
-  // budget alone is blind to the attack that actually matters here: credential
-  // stuffing driven from a botnet, where every request carries a fresh address
-  // but always targets the same handful of accounts. Empty for the admin login,
-  // which has one account by definition.
-  await sql`
-    ALTER TABLE login_attempts
-    ADD COLUMN IF NOT EXISTS account_hash text NOT NULL DEFAULT ''
   `;
   await sql`
     CREATE INDEX IF NOT EXISTS login_attempts_scope_ip_idx
@@ -2429,14 +2480,13 @@ export async function countRecentLoginAttempts(
   ipHash: string,
   withinMinutes: number,
 ): Promise<number> {
-  const sql = getSql();
   const rows = (await sql`
-    SELECT count(*)::int AS n
+    SELECT count(*) AS n
     FROM login_attempts
     WHERE scope = ${scope}
       AND ip_hash = ${ipHash}
-      AND created_at > now() - make_interval(mins => ${withinMinutes})
-  `) as { n: number }[];
+      AND created_at > ${ago(`-${Math.max(0, Math.floor(withinMinutes))} minutes`)}
+  `) as unknown as { n: number }[];
   return rows[0]?.n ?? 0;
 }
 
@@ -2452,15 +2502,14 @@ export async function countRecentAccountLoginAttempts(
   accountHash: string,
   withinMinutes: number,
 ): Promise<number> {
-  const sql = getSql();
   const rows = (await sql`
-    SELECT count(*)::int AS n
+    SELECT count(*) AS n
     FROM login_attempts
     WHERE scope = ${scope}
       AND account_hash = ${accountHash}
       AND account_hash <> ''
-      AND created_at > now() - make_interval(mins => ${withinMinutes})
-  `) as { n: number }[];
+      AND created_at > ${ago(`-${Math.max(0, Math.floor(withinMinutes))} minutes`)}
+  `) as unknown as { n: number }[];
   return rows[0]?.n ?? 0;
 }
 
@@ -2476,7 +2525,6 @@ export async function recordFailedLogin(
   ipHash: string,
   accountHash = "",
 ): Promise<void> {
-  const sql = getSql();
   await sql`
     INSERT INTO login_attempts (scope, ip_hash, account_hash)
     VALUES (${scope}, ${ipHash}, ${accountHash})
@@ -2484,7 +2532,7 @@ export async function recordFailedLogin(
 
   if (Math.random() < 0.02) {
     try {
-      await sql`DELETE FROM login_attempts WHERE created_at < now() - interval '1 day'`;
+      await sql`DELETE FROM login_attempts WHERE created_at < ${ago("-1 day")}`;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       console.error(`[db] login_attempts cleanup failed: ${message}`);

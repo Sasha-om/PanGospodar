@@ -17,7 +17,10 @@
  */
 
 import { config } from "dotenv";
-import { CONNECTION_ENV_VARS } from "../lib/db";
+import {
+  CONNECTION_TOKEN_ENV_VARS,
+  CONNECTION_URL_ENV_VARS,
+} from "../lib/db";
 
 config({ path: ".env.local", quiet: true });
 
@@ -50,11 +53,25 @@ function section(title: string): void {
 
 section("Обов'язкове");
 
-const dbVar = CONNECTION_ENV_VARS.find((name) => isSet(name));
+// Either spelling counts: the Vercel↔Turso integration provisions the
+// STORAGE_-prefixed names, a hand-written .env.local uses the plain ones.
+const dbUrlVar = CONNECTION_URL_ENV_VARS.find((name) => isSet(name));
+const dbTokenVar = CONNECTION_TOKEN_ENV_VARS.find((name) => isSet(name));
+const dbUrl = dbUrlVar ? value(dbUrlVar) : "";
+// A local `file:` database is a valid setup and needs no token; a remote one
+// does, and silently failing to authenticate is the confusing case worth
+// calling out here.
+const isLocalFile = dbUrl.startsWith("file:");
 report(
-  dbVar ? "ok" : "fail",
-  "База даних",
-  dbVar ? `рядок підключення у ${dbVar}` : `не задано жодної з: ${CONNECTION_ENV_VARS.slice(0, 3).join(", ")}…`,
+  dbUrl ? (isLocalFile || dbTokenVar ? "ok" : "warn") : "fail",
+  "База даних (Turso)",
+  !dbUrl
+    ? `не задано жодної з: ${CONNECTION_URL_ENV_VARS.join(", ")}`
+    : isLocalFile
+      ? `локальний файл (${dbUrl}) — токен не потрібен`
+      : dbTokenVar
+        ? `${dbUrlVar} + ${dbTokenVar}`
+        : `${dbUrlVar} задано, але токен порожній (${CONNECTION_TOKEN_ENV_VARS.join(" / ")})`,
 );
 
 const secret = value("SESSION_SECRET");

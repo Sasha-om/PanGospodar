@@ -12,7 +12,7 @@ import type { ReviewStats } from "@/lib/reviews";
  * Single entry point for reading the catalog.
  *
  * Source priority:
- *   1. Postgres (`products` table) — the production source of truth
+ *   1. Turso (`products` table) — the production source of truth
  *   2. Local sync file (`UKR_SKLAD_FILE_PATH`) — legacy/offline fallback
  *   3. Empty catalog — nothing configured, the UI shows its empty states
  *
@@ -28,7 +28,7 @@ export interface LoadProductsResult {
   loadedAt: string;
   /** Diagnostics — why the catalog is empty is otherwise invisible in prod. */
   diagnostics?: {
-    /** Was a Postgres connection string found in the environment? */
+    /** Was a Turso connection found in the environment? */
     databaseConfigured: boolean;
     /** Name of the env var that supplied it (never the value). */
     connectionSource?: string;
@@ -79,7 +79,7 @@ export async function loadProducts(): Promise<LoadProductsResult> {
         loadReviewStats(),
       ]);
       console.info(
-        `[catalog] Loaded ${products.length} products from Postgres (via ${connectionSource})`,
+        `[catalog] Loaded ${products.length} products from Turso (via ${connectionSource})`,
       );
       return {
         products: withRatings(products, reviewStats),
@@ -94,7 +94,7 @@ export async function loadProducts(): Promise<LoadProductsResult> {
       // but keep the reason so it reaches the API response.
     }
   } else {
-    console.warn("[catalog] No Postgres connection string found in env");
+    console.warn("[catalog] No Turso connection found in env");
   }
 
   const fileResult = await loadProductsFromFile();
