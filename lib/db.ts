@@ -11,8 +11,9 @@ import {
   now,
   sql,
   toBool,
-  TURSO_TOKEN_ENV,
-  TURSO_URL_ENV,
+  TURSO_TOKEN_ENV_VARS,
+  TURSO_URL_ENV_VARS,
+  getDatabaseUrlSource,
   type SqlQuery,
 } from "@/lib/libsql";
 import { MAX_PRODUCT_IMAGES, type Product } from "@/lib/products";
@@ -72,15 +73,26 @@ import {
  */
 
 /**
- * Env vars that configure the database, in the order the setup docs mention
- * them. Kept as a list because several call sites report "set one of these"
+ * Env vars that configure the database, URL candidates first.
+ *
+ * Two spellings of each: the Vercel↔Turso integration provisions the
+ * `STORAGE_`-prefixed names, while a hand-written `.env.local` uses the plain
+ * ones. Kept as a list because several call sites report "set one of these"
  * to the operator when nothing is configured.
  */
-export const CONNECTION_ENV_VARS = [TURSO_URL_ENV, TURSO_TOKEN_ENV] as const;
+export const CONNECTION_ENV_VARS = [
+  ...TURSO_URL_ENV_VARS,
+  ...TURSO_TOKEN_ENV_VARS,
+] as const;
+
+/** Env vars that can supply the URL, most specific first. */
+export const CONNECTION_URL_ENV_VARS = TURSO_URL_ENV_VARS;
+/** Env vars that can supply the auth token. */
+export const CONNECTION_TOKEN_ENV_VARS = TURSO_TOKEN_ENV_VARS;
 
 /** Name of the env var that supplied the connection (for diagnostics). */
 export function getConnectionSource(): string | undefined {
-  return getDatabaseUrl() ? TURSO_URL_ENV : undefined;
+  return getDatabaseUrlSource();
 }
 
 export function getConnectionString(): string | undefined {

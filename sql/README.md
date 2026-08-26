@@ -4,7 +4,8 @@
 **Turso (libSQL/SQLite)**, і схема тепер описана декларативно в одному місці:
 
 - **`lib/schema.ts`** — єдине джерело правди (Drizzle ORM, діалект SQLite).
-- **`npm run db:push`** — застосовує цю схему до бази з `TURSO_DATABASE_URL`.
+- **`npm run db:push`** — застосовує цю схему до бази з `TURSO_DATABASE_URL`
+  (або `STORAGE_TURSO_DATABASE_URL`, як її називає інтеграція Vercel).
 - **`npm run db:generate`** — якщо потрібні версіоновані міграції в `drizzle/`.
 
 Старий Postgres-DDL видалено навмисно: він не виконується на SQLite (`jsonb`,

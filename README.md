@@ -29,8 +29,8 @@ npm run dev
 
 | Змінна | Обов'язкова | Опис |
 |---|---|---|
-| `TURSO_DATABASE_URL` | **так** | Адреса бази Turso (`libsql://…`). Для локальної спроби без акаунта — `file:local.db` |
-| `TURSO_AUTH_TOKEN` | **так*** | Токен доступу до Turso. *Не потрібен лише для локального `file:`-варіанта |
+| `TURSO_DATABASE_URL` | **так** | Адреса бази Turso (`libsql://…`). Для локальної спроби без акаунта — `file:local.db`. На Vercel інтеграція створює її як `STORAGE_TURSO_DATABASE_URL` — код приймає обидва написання |
+| `TURSO_AUTH_TOKEN` | **так*** | Токен доступу до Turso (на Vercel — `STORAGE_TURSO_AUTH_TOKEN`). *Не потрібен лише для локального `file:`-варіанта |
 | `IMPORT_TOKEN` | **так** | Спільний секрет для `/api/import-stock`. Згенерувати: `openssl rand -hex 32` |
 | `SESSION_SECRET` | **так** | Ключ підпису cookie сесії. Згенерувати: `openssl rand -base64 32` |
 | `ADMIN_PASSWORD` | **так** | Пароль до `/admin` |
@@ -65,8 +65,12 @@ turso db show panhospodar --url      # -> TURSO_DATABASE_URL
 turso db tokens create panhospodar   # -> TURSO_AUTH_TOKEN
 ```
 
-Обидва значення — у `.env.local` (і в змінні проєкту на Vercel). Далі створити
-таблиці:
+Обидва значення — у `.env.local` (і в змінні проєкту на Vercel). Якщо базу
+підключено через інтеграцію Vercel, змінні там уже названі
+`STORAGE_TURSO_DATABASE_URL` і `STORAGE_TURSO_AUTH_TOKEN` — перейменовувати не
+треба, код перевіряє спершу їх, а потім варіанти без префікса.
+
+Далі створити таблиці:
 
 ```bash
 npm run db:push
